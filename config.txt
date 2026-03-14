@@ -4,16 +4,17 @@
 # Force MP4 container
 --merge-output-format mp4
 
-# Organized folders: uploader/date-title
+# Organized folders
 -o "%(uploader)s/%(upload_date)s - %(title)s.%(ext)s"
 
-# Subtitles
+# Subtitles (manual + auto, no translations)
 --write-subs
 --write-auto-subs
---all-subs
+--sub-langs "all,-.*-.*"
 --embed-subs
+--convert-subs srt
 
-# Thumbnail (PNG as requested)
+# Thumbnail (PNG)
 --write-thumbnail
 --convert-thumbnails png
 --embed-thumbnail
@@ -31,9 +32,6 @@
 # Chapters
 --embed-chapters
 
-# Annotations if available
---write-annotations
-
 # Resume downloads
 --continue
 
@@ -44,8 +42,13 @@
 --retries infinite
 --fragment-retries infinite
 
+# Rate limit protection
+--sleep-requests 2
+--sleep-interval 2
+--max-sleep-interval 5
+
 # Avoid duplicate downloads
---download-archive archive.txt
+--download-archive C:/yt-dlp/archive.txt
 
 # Safer filenames for Windows
 --restrict-filenames
