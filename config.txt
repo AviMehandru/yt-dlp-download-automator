@@ -1,0 +1,51 @@
+# Best video + audio
+-f bv*+ba/b
+
+# Force MP4 container
+--merge-output-format mp4
+
+# Output filename
+-o %(title)s.%(ext)s
+
+# Subtitles
+--write-subs
+--write-auto-subs
+--all-subs
+--embed-subs
+
+# Thumbnail
+--write-thumbnail
+--convert-thumbnails png
+--embed-thumbnail
+
+# Metadata
+--add-metadata
+--embed-metadata
+
+# Save description
+--write-description
+
+# Save full metadata JSON
+--write-info-json
+
+# Save chapters
+--embed-chapters
+
+# Save annotations if available
+--write-annotations
+
+# Continue partial downloads
+--continue
+
+# Don't overwrite existing files
+--no-overwrites
+
+# Retry robustness
+--retries infinite
+--fragment-retries infinite
+
+# Save upload date in metadata
+--parse-metadata "upload_date:%(upload_date)s"
+
+# Optional: better filenames
+--restrict-filenames
