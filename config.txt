@@ -7,10 +7,11 @@
 # Organized folders
 -o "%(uploader)s/%(upload_date)s - %(title)s.%(ext)s"
 
-# Subtitles
+# Subtitles (manual + auto-generated only)
 --write-subs
 --write-auto-subs
---sub-langs "all,-*-*"
+--sub-langs all
+--extractor-args "youtube:skip=translated_subs"
 --embed-subs
 --convert-subs srt
 
