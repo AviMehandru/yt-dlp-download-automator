@@ -7,14 +7,14 @@
 # Organized folders
 -o "%(uploader)s/%(upload_date)s - %(title)s.%(ext)s"
 
-# Subtitles (manual + auto, no translations)
+# Subtitles
 --write-subs
 --write-auto-subs
---sub-langs "all,-.*-.*"
+--sub-langs "all,-*-*"
 --embed-subs
 --convert-subs srt
 
-# Thumbnail (PNG)
+# Thumbnail
 --write-thumbnail
 --convert-thumbnails png
 --embed-thumbnail
