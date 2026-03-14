@@ -4,8 +4,8 @@
 # Force MP4 container
 --merge-output-format mp4
 
-# Output filename
--o %(title)s.%(ext)s
+# Organized folders: uploader/date-title
+-o "%(uploader)s/%(upload_date)s - %(title)s.%(ext)s"
 
 # Subtitles
 --write-subs
@@ -13,7 +13,7 @@
 --all-subs
 --embed-subs
 
-# Thumbnail
+# Thumbnail (PNG as requested)
 --write-thumbnail
 --convert-thumbnails png
 --embed-thumbnail
@@ -22,30 +22,30 @@
 --add-metadata
 --embed-metadata
 
-# Save description
+# Description
 --write-description
 
-# Save full metadata JSON
+# Full metadata archive
 --write-info-json
 
-# Save chapters
+# Chapters
 --embed-chapters
 
-# Save annotations if available
+# Annotations if available
 --write-annotations
 
-# Continue partial downloads
+# Resume downloads
 --continue
 
-# Don't overwrite existing files
+# Avoid overwriting
 --no-overwrites
 
 # Retry robustness
 --retries infinite
 --fragment-retries infinite
 
-# Save upload date in metadata
---parse-metadata "upload_date:%(upload_date)s"
+# Avoid duplicate downloads
+--download-archive archive.txt
 
-# Optional: better filenames
+# Safer filenames for Windows
 --restrict-filenames
