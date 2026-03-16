@@ -1,17 +1,19 @@
 # Best video + audio
 -f bv*+ba/b
 
-# Force MP4 container
+# Merge into MP4
 --merge-output-format mp4
 
-# Organized folders
+# Keep original streams
+--keep-video
+
+# Folder structure
 -o "%(uploader)s/%(upload_date)s - %(title)s.%(ext)s"
 
-# Subtitles (manual + auto-generated only)
+# Subtitles (English only)
 --write-subs
 --write-auto-subs
---sub-langs all
---extractor-args "youtube:skip=translated_subs"
+--sub-langs "en,en-orig"
 --embed-subs
 --convert-subs srt
 
@@ -23,33 +25,17 @@
 # Metadata
 --add-metadata
 --embed-metadata
-
-# Description
 --write-description
-
-# Full metadata archive
 --write-info-json
-
-# Chapters
 --embed-chapters
 
-# Resume downloads
---continue
-
-# Avoid overwriting
---no-overwrites
-
-# Retry robustness
---retries infinite
---fragment-retries infinite
-
-# Rate limit protection
+# Rate limiting
 --sleep-requests 2
---sleep-interval 2
---max-sleep-interval 5
+--sleep-subtitles 2
+--concurrent-fragments 1
 
-# Avoid duplicate downloads
+# Avoid duplicates
 --download-archive C:/yt-dlp/archive.txt
 
-# Safer filenames for Windows
+# Safe filenames
 --restrict-filenames
