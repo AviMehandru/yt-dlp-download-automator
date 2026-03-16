@@ -1,56 +1,55 @@
-# Best video + audio
+# Best quality
 -f bv*+ba/b
 
-# Force MP4 container
+# Merge container
 --merge-output-format mp4
 --keep-video
 
-# Organized folders
--o "%(uploader)s/%(playlist_title|Videos)s/%(upload_date)s - %(title)s.%(ext)s"
+# MAIN video library
+-o "D:/YouTubeArchive/Video/%(uploader)s/%(upload_date)s - %(title)s.%(ext)s"
 
-# English subtitles only
+# Archive original streams
+-P "temp:D:/YouTubeArchive/Archive/%(uploader)s/%(upload_date)s - %(title)s"
+
+# Subtitles
 --write-subs
 --write-auto-subs
 --sub-langs "en.*"
---embed-subs
-
-# Thumbnail
---write-thumbnail
---convert-thumbnails png
---embed-thumbnail
+--convert-subs vtt
+--paths "subtitle:D:/YouTubeArchive/Subtitles/%(uploader)s"
 
 # Metadata
+--write-info-json
+--write-description
+--paths "infojson:D:/YouTubeArchive/Metadata/%(uploader)s"
+
+# Thumbnails
+--write-thumbnail
+--convert-thumbnails png
+--paths "thumbnail:D:/YouTubeArchive/Thumbnails/%(uploader)s"
+
+# Metadata embedding
 --add-metadata
 --embed-metadata
-
-# Description
---write-description
-
-# Full metadata archive
---write-info-json
-
-# Chapters
 --embed-chapters
 
 # Resume downloads
 --continue
-
-# Avoid overwriting
 --no-overwrites
 
-# Retry robustness
+# Robust downloads
 --retries infinite
 --fragment-retries infinite
 
-# Rate limit protection
+# Rate limiting
 --sleep-requests 2
 --sleep-subtitles 30
 --sleep-interval 2
 --max-sleep-interval 60
 --concurrent-fragments 1
 
-# Avoid duplicate downloads
---download-archive C:/yt-dlp/archive.txt
+# Archive list
+--download-archive D:/YouTubeArchive/archive.txt
 
-# Safer filenames for Windows
+# Safe filenames
 --restrict-filenames
