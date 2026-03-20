@@ -1,34 +1,52 @@
---update
 -f bv*+ba/b
 --merge-output-format mp4
 --keep-video
--o "C:/yt-dlp/Youtube Videos/Complete Archive/%(uploader)s/%(upload_date)s - %(title)s/%(upload_date)s - %(title)s.%(ext)s"
+
+# Proper archive structure
+-o "%(uploader)s/Complete Archive/%(upload_date)s - %(title)s/%(upload_date)s - %(title)s.%(ext)s"
+
+# Subtitles
 --write-subs
 --write-auto-subs
 --sub-langs "en.*"
 --embed-subs
---paths "subtitle:C:/yt-dlp/Youtube Videos/Complete Archive/%(uploader)s/%(upload_date)s - %(title)s/Subtitles"
+--paths "subtitle:%(uploader)s/Complete Archive/%(upload_date)s - %(title)s/Subtitles"
+
+# Thumbnails
 --write-thumbnail
 --convert-thumbnails png
 --embed-thumbnail
---paths "thumbnail:C:/yt-dlp/Youtube Videos/Complete Archive/%(uploader)s/%(upload_date)s - %(title)s/Thumbnails"
+--paths "thumbnail:%(uploader)s/Complete Archive/%(upload_date)s - %(title)s/Thumbnails"
+
+# Metadata
 --add-metadata
 --embed-metadata
 --write-description
---paths "description:C:/yt-dlp/Youtube Videos/Complete Archive/%(uploader)s/%(upload_date)s - %(title)s/Metadata"
 --write-info-json
---paths "infojson:C:/yt-dlp/Youtube Videos/Complete Archive/%(uploader)s/%(upload_date)s - %(title)s/Metadata"
+--paths "infojson:%(uploader)s/Complete Archive/%(upload_date)s - %(title)s/Metadata"
+--paths "description:%(uploader)s/Complete Archive/%(upload_date)s - %(title)s/Metadata"
+
+# Chapters
 --embed-chapters
+
+# Stability
 --continue
 --no-overwrites
 --retries infinite
 --fragment-retries infinite
+
+# Rate limiting
 --sleep-requests 2
 --sleep-subtitles 30
 --sleep-interval 2
 --max-sleep-interval 60
 --concurrent-fragments 1
+
+# Archive tracking
 --download-archive C:/yt-dlp/archive.txt
---windows-filenames
---exec "after_move:cmd /c mkdir \"C:\yt-dlp\Youtube Videos\Pure Video\%(uploader)s\" 2>nul && copy /Y \"%(filepath)s\" \"C:\yt-dlp\Youtube Videos\Pure Video\%(uploader)s\%(upload_date)s - %(title)s.%(ext)s\""
---write-link
+
+# Safer filenames
+--restrict-filenames
+
+# Copy final video to "Pure Video"
+--exec "after_move:cmd /c mkdir \"%(uploader)s\Pure Video\" 2>nul & copy \"{}\" \"%(uploader)s\Pure Video\%(upload_date)s - %(title)s.%(ext)s\""
