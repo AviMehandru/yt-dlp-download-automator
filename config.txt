@@ -1,55 +1,34 @@
-# Best quality
+--update
 -f bv*+ba/b
-
-# Merge container
 --merge-output-format mp4
 --keep-video
-
-# MAIN video library
--o "D:/YouTubeArchive/Video/%(uploader)s/%(upload_date)s - %(title)s.%(ext)s"
-
-# Archive original streams
--P "temp:D:/YouTubeArchive/Archive/%(uploader)s/%(upload_date)s - %(title)s"
-
-# Subtitles
+-o "C:/yt-dlp/Youtube Videos/Complete Archive/%(uploader)s/%(upload_date)s - %(title)s/%(upload_date)s - %(title)s.%(ext)s"
 --write-subs
 --write-auto-subs
 --sub-langs "en.*"
---convert-subs vtt
---paths "subtitle:D:/YouTubeArchive/Subtitles/%(uploader)s"
-
-# Metadata
---write-info-json
---write-description
---paths "infojson:D:/YouTubeArchive/Metadata/%(uploader)s"
-
-# Thumbnails
+--embed-subs
+--paths "subtitle:C:/yt-dlp/Youtube Videos/Complete Archive/%(uploader)s/%(upload_date)s - %(title)s/Subtitles"
 --write-thumbnail
 --convert-thumbnails png
---paths "thumbnail:D:/YouTubeArchive/Thumbnails/%(uploader)s"
-
-# Metadata embedding
+--embed-thumbnail
+--paths "thumbnail:C:/yt-dlp/Youtube Videos/Complete Archive/%(uploader)s/%(upload_date)s - %(title)s/Thumbnails"
 --add-metadata
 --embed-metadata
+--write-description
+--paths "description:C:/yt-dlp/Youtube Videos/Complete Archive/%(uploader)s/%(upload_date)s - %(title)s/Metadata"
+--write-info-json
+--paths "infojson:C:/yt-dlp/Youtube Videos/Complete Archive/%(uploader)s/%(upload_date)s - %(title)s/Metadata"
 --embed-chapters
-
-# Resume downloads
 --continue
 --no-overwrites
-
-# Robust downloads
 --retries infinite
 --fragment-retries infinite
-
-# Rate limiting
 --sleep-requests 2
 --sleep-subtitles 30
 --sleep-interval 2
 --max-sleep-interval 60
 --concurrent-fragments 1
-
-# Archive list
---download-archive D:/YouTubeArchive/archive.txt
-
-# Safe filenames
---restrict-filenames
+--download-archive C:/yt-dlp/archive.txt
+--windows-filenames
+--exec "after_move:cmd /c mkdir \"C:\yt-dlp\Youtube Videos\Pure Video\%(uploader)s\" 2>nul && copy /Y \"%(filepath)s\" \"C:\yt-dlp\Youtube Videos\Pure Video\%(uploader)s\%(upload_date)s - %(title)s.%(ext)s\""
+--write-link
