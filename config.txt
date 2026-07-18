@@ -1,161 +1,36 @@
-###############################################################################
-##
-##                         yt-dlp Master Archive Configuration
-##
-##  Version: 1.0.0
-##
-##  This configuration is designed for LONG-TERM DIGITAL PRESERVATION.
-##
-##  Goals:
-##
-##      • Preserve the highest-quality media available.
-##      • Preserve original streams.
-##      • Preserve all metadata.
-##      • Preserve subtitles.
-##      • Preserve thumbnails.
-##      • Preserve descriptions.
-##      • Preserve comments.
-##      • Preserve chapters.
-##      • Produce a merged archival master.
-##      • Keep original downloaded files.
-##      • Organize everything automatically.
-##
-###############################################################################
-
-###############################################################################
-## General
-###############################################################################
-
 --update
-
---ignore-errors
-
---continue
-
---no-overwrites
-
---no-part
-
---abort-on-error
-
-###############################################################################
-## Network
-###############################################################################
-
---retries infinite
-
---fragment-retries infinite
-
---file-access-retries infinite
-
---extractor-retries infinite
-
---retry-sleep exponential=1:60
-
---concurrent-fragments 1
-
-###############################################################################
-## Format Selection
-###############################################################################
-
--f "bv*+ba/bestvideo*+bestaudio/best"
-
-###############################################################################
-## Merge
-###############################################################################
-
+-f bv*+ba/b
 --merge-output-format mkv
-
 --keep-video
-
-###############################################################################
-## Metadata
-###############################################################################
-
---add-metadata
-
---embed-metadata
-
---embed-chapters
-
-###############################################################################
-## Information Files
-###############################################################################
-
---write-info-json
-
---write-description
-
-###############################################################################
-## Comments
-###############################################################################
-
---write-comments
-
-###############################################################################
-## Subtitles
-###############################################################################
-
+--paths "home:C:/yt-dlp/Youtube Videos/Complete Archive/%(uploader)s/%(uploader)s - %(upload_date)s - %(id)s - %(title)s"
+-o "%(uploader)s - %(upload_date)s - %(id)s - %(title)s.%(ext)s"
 --write-subs
-
 --write-auto-subs
-
---sub-langs all,-live_chat
-
+--sub-langs "en.*"
 --embed-subs
-
-###############################################################################
-## Thumbnail
-###############################################################################
-
+--paths "subtitle:Subtitles"
 --write-thumbnail
-
+--convert-thumbnails png
 --embed-thumbnail
-
-###############################################################################
-## URL Shortcut
-###############################################################################
-
+--paths "thumbnail:Thumbnails"
+--add-metadata
+--embed-metadata
+--write-description
+--paths "description:Metadata"
+--write-info-json
+--paths "infojson:Metadata"
+--write-comments
+--embed-chapters
 --write-link
-
-###############################################################################
-## Playlist Metadata
-###############################################################################
-
---write-playlist-metafiles
-
-###############################################################################
-## Archive
-###############################################################################
-
---download-archive "C:\yt-dlp\download-archive.txt"
-
-###############################################################################
-## Naming Convention
-###############################################################################
-
--o "C:\yt-dlp\Youtube Videos\Complete Archive\%(uploader)s\%(uploader)s - %(upload_date)s - %(id)s - %(title)s\%(uploader)s - %(upload_date)s - %(id)s - %(title)s.%(ext)s"
-
-###############################################################################
-## Windows
-###############################################################################
-
+--continue
+--no-overwrites
+--retries infinite
+--fragment-retries infinite
+--sleep-requests 2
+--sleep-subtitles 30
+--sleep-interval 2
+--max-sleep-interval 60
+--concurrent-fragments 1
+--download-archive C:/yt-dlp/archive.txt
 --windows-filenames
-
-###############################################################################
-## Logging
-###############################################################################
-
---progress
-
---newline
-
-###############################################################################
-## Automatic Post Processing
-###############################################################################
-
---exec "after_move:powershell.exe -ExecutionPolicy Bypass -File C:\yt-dlp\postprocess.ps1 \"%(filepath)s\" \"%(uploader)s\" \"%(uploader_id)s\" \"%(channel)s\" \"%(channel_id)s\" \"%(upload_date)s\" \"%(id)s\" \"%(title)s\" \"%(webpage_url)s\""
-
-###############################################################################
-## End of Configuration
-###############################################################################
+--exec "after_move:C:/yt-dlp/copy_to_pure.bat \"%(filepath)s\" \"%(uploader)s\" \"%(upload_date)s\" \"%(id)s\" \"%(title)s\" \"%(ext)s\""
