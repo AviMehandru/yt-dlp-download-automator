@@ -148,7 +148,40 @@ try {
     $globalManifest += [ordered]@{ video_id = $videoId; title = $title; uploader = $uploader; upload_date = $uploadDate; url = $originalUrl; folder = $videoDir }
     $globalManifest | ConvertTo-Json -Depth 4 | Set-Content $globalManifestPath
 
-    Log "Updated channel and global manifests. Post-processing complete."
+    Log "Updated channel and global manifests."
+
+    # --- Channel-level assets: avatar, banner, description, channel info.json ---
+    # Lives outside the individual video folders, at the channel root, and is
+    # refreshed (overwritten) every time a video from this channel finishes.
+    try {
+        $channelInfoDir = Join-Path $channelDir "Channel Info"
+        if (Test-Path $channelInfoDir) {
+            Remove-Item -Path "$channelInfoDir\*" -Recurse -Force
+        } else {
+            New-Item -ItemType Directory -Path $channelInfoDir -Force | Out-Null
+        }
+
+        if ($channelUrl) {
+            & yt-dlp `
+                --skip-download `
+                --flat-playlist `
+                --playlist-items 0 `
+                --write-info-json `
+                --write-all-thumbnails `
+                --write-description `
+                -o (Join-Path $channelInfoDir "channel.%(ext)s") `
+                $channelUrl 2>&1 | ForEach-Object { Log "  [channel-info] $_" }
+
+            Log "Refreshed Channel Info for $uploader."
+        } else {
+            Log "No channel_url found in info.json — skipped Channel Info refresh."
+        }
+    }
+    catch {
+        Log "WARNING: Channel Info refresh failed: $($_.Exception.Message)"
+    }
+
+    Log "Post-processing complete."
 }
 catch {
     $errMsg = "ERROR during post-processing: $($_.Exception.Message)"
