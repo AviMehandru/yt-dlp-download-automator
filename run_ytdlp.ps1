@@ -1,0 +1,36 @@
+param(
+    [Parameter(Mandatory = $true)][string]$Url
+)
+
+$root            = "C:/yt-dlp"
+$logFile         = Join-Path $root "download.log"
+$historyDir      = Join-Path $root "Archive History"
+$archiveFile     = Join-Path $root "archive.txt"
+$globalManifest  = Join-Path $root "Youtube Videos/global_manifest.json"
+$confFile        = Join-Path $root "yt-dlp.conf"
+
+if (!(Test-Path $historyDir)) { New-Item -ItemType Directory -Path $historyDir -Force | Out-Null }
+
+$timestamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
+
+# --- Versioned archival snapshot (#16): back up archive.txt + global manifest before this run ---
+if (Test-Path $archiveFile)    { Copy-Item $archiveFile "$historyDir/archive_$timestamp.txt" }
+if (Test-Path $globalManifest) { Copy-Item $globalManifest "$historyDir/global_manifest_$timestamp.json" }
+
+$configVersion = $null
+if (Test-Path $confFile) {
+    $m = Select-String -Path $confFile -Pattern "CONFIG_VERSION:\s*(\S+)" | Select-Object -First 1
+    if ($m) { $configVersion = $m.Matches[0].Groups[1].Value }
+}
+$ytDlpVersion  = (& yt-dlp --version) 2>$null
+$ffmpegRaw     = (& ffmpeg -version) 2>$null
+$ffmpegVersion = if ($ffmpegRaw) { ($ffmpegRaw -split "`n")[0] } else { $null }
+
+"==== Download session started $timestamp ====" | Tee-Object -FilePath $logFile -Append
+"yt-dlp: $ytDlpVersion | ffmpeg: $ffmpegVersion | config version: $configVersion" | Tee-Object -FilePath $logFile -Append
+"URL: $Url" | Tee-Object -FilePath $logFile -Append
+
+# --- Run yt-dlp, capturing stdout AND stderr (warnings/errors) into the log ---
+& yt-dlp --config-location $confFile $Url 2>&1 | Tee-Object -FilePath $logFile -Append
+
+"==== Download session finished $(Get-Date -Format o) ====" | Tee-Object -FilePath $logFile -Append
