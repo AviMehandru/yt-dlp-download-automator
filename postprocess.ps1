@@ -155,13 +155,29 @@ try {
     # refreshed (overwritten) every time a video from this channel finishes.
     try {
         $channelInfoDir = Join-Path $channelDir "Channel Info"
-        if (Test-Path $channelInfoDir) {
-            Remove-Item -Path "$channelInfoDir\*" -Recurse -Force
-        } else {
+        if (!(Test-Path $channelInfoDir)) {
             New-Item -ItemType Directory -Path $channelInfoDir -Force | Out-Null
         }
 
-        if ($channelUrl) {
+        # Throttle: skip re-fetching if we already refreshed recently. This matters
+        # most when running against a whole channel/playlist in one go, so we don't
+        # hit the channel's About page once per video in a 100+ video run.
+        $throttleMarker = Join-Path $channelInfoDir ".last_refresh"
+        $throttleHours = 6
+        $needsRefresh = $true
+        if (Test-Path $throttleMarker) {
+            $age = (Get-Date) - (Get-Item $throttleMarker).LastWriteTime
+            if ($age.TotalHours -lt $throttleHours) { $needsRefresh = $false }
+        }
+
+        if (-not $channelUrl) {
+            Log "No channel_url found in info.json — skipped Channel Info refresh."
+        } elseif (-not $needsRefresh) {
+            Log "Channel Info refreshed within the last $throttleHours hours — skipped."
+        } else {
+            # Only clear the folder once we're actually about to repopulate it.
+            Remove-Item -Path "$channelInfoDir\*" -Recurse -Force -ErrorAction SilentlyContinue
+
             & yt-dlp `
                 --skip-download `
                 --flat-playlist `
@@ -172,9 +188,8 @@ try {
                 -o (Join-Path $channelInfoDir "channel.%(ext)s") `
                 $channelUrl 2>&1 | ForEach-Object { Log "  [channel-info] $_" }
 
+            Set-Content -Path $throttleMarker -Value (Get-Date -Format "o")
             Log "Refreshed Channel Info for $uploader."
-        } else {
-            Log "No channel_url found in info.json — skipped Channel Info refresh."
         }
     }
     catch {
