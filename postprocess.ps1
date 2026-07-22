@@ -179,6 +179,7 @@ try {
             Remove-Item -Path "$channelInfoDir\*" -Recurse -Force -ErrorAction SilentlyContinue
 
             & yt-dlp `
+                --ignore-config `
                 --skip-download `
                 --flat-playlist `
                 --playlist-items 0 `

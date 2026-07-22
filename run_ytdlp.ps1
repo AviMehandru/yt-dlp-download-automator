@@ -2,6 +2,12 @@ param(
     [Parameter(Mandatory = $true)][string]$Url
 )
 
+# On PowerShell 7.3+, native-command stderr lines get wrapped as ErrorRecord
+# objects when redirected (2>&1 below), which prints/logs them as noisy
+# "NativeCommandError" blocks instead of yt-dlp's plain warning/error text.
+# This restores plain-text passthrough. Harmless no-op on older PowerShell.
+$PSNativeCommandUseErrorActionPreference = $false
+
 $root            = "C:/yt-dlp"
 $logFile         = Join-Path $root "download.log"
 $historyDir      = Join-Path $root "Archive History"
@@ -31,6 +37,10 @@ $ffmpegVersion = if ($ffmpegRaw) { ($ffmpegRaw -split "`n")[0] } else { $null }
 "URL: $Url" | Tee-Object -FilePath $logFile -Append
 
 # --- Run yt-dlp, capturing stdout AND stderr (warnings/errors) into the log ---
-& yt-dlp --config-location $confFile $Url 2>&1 | Tee-Object -FilePath $logFile -Append
+# --ignore-config stops yt-dlp from also auto-loading any yt-dlp.conf it finds
+# in the current directory, %APPDATA%, or next to the binary. Without it, a
+# stray leftover config file anywhere on the auto-discovery path silently
+# merges its own options (and any --exec lines) into every run.
+& yt-dlp --ignore-config --config-location $confFile $Url 2>&1 | Tee-Object -FilePath $logFile -Append
 
 "==== Download session finished $(Get-Date -Format o) ====" | Tee-Object -FilePath $logFile -Append
