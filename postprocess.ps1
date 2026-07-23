@@ -31,19 +31,45 @@ try {
 
     Log "Post-processing started for: $FilePath"
 
-    # --- Locate the matching info.json ---
-    $infoJsonFile = Get-ChildItem -Path $videoMetaDir -Filter "*.info.json" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $infoJsonFile) { throw "Could not find matching .info.json in $videoMetaDir" }
-    $info = Get-Content $infoJsonFile.FullName -Raw | ConvertFrom-Json
+    # --- Locate the matching info.json (retry briefly for FS/AV-scan lag) ---
+    $infoJsonFile = $null
+    for ($i = 0; $i -lt 5; $i++) {
+        $infoJsonFile = Get-ChildItem -Path $videoMetaDir -Filter "*.info.json" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($infoJsonFile) { break }
+        Start-Sleep -Seconds 2
+    }
 
-    $videoId      = $info.id
-    $title        = $info.title
-    $uploadDate   = $info.upload_date
-    $originalUrl  = if ($info.original_url) { $info.original_url } else { $info.webpage_url }
-    $channelUrl   = if ($info.channel_url) { $info.channel_url } else { $info.uploader_url }
-    $shortUrl     = "https://youtu.be/$videoId"
-    $embedUrl     = "https://www.youtube.com/embed/$videoId"
-    $playlistUrl  = if ($info.playlist_id) { "https://www.youtube.com/playlist?list=$($info.playlist_id)" } else { $null }
+    if ($infoJsonFile) {
+        $info = Get-Content $infoJsonFile.FullName -Raw | ConvertFrom-Json
+        $videoId      = $info.id
+        $title        = $info.title
+        $uploadDate   = $info.upload_date
+        $originalUrl  = if ($info.original_url) { $info.original_url } else { $info.webpage_url }
+        $channelUrl   = if ($info.channel_url) { $info.channel_url } else { $info.uploader_url }
+        $shortUrl     = "https://youtu.be/$videoId"
+        $embedUrl     = "https://www.youtube.com/embed/$videoId"
+        $playlistUrl  = if ($info.playlist_id) { "https://www.youtube.com/playlist?list=$($info.playlist_id)" } else { $null }
+    } else {
+        # Degrade gracefully rather than aborting: still do checksums, the
+        # manifest, and (importantly) the Pure Video copy below, just with
+        # blank URL/playlist fields. Recover what we can from the folder
+        # name itself, which encodes uploader/date/id/title.
+        Log "WARNING: No .info.json found in $videoMetaDir after retrying. Continuing with filename-derived metadata only."
+        $info = $null
+        $folderName = Split-Path $videoDir -Leaf
+        if ($folderName -match '^(?<uploader>.+?) - (?<date>\d{8}) - (?<id>[\w-]{6,})\s*-\s*(?<title>.+)$') {
+            $videoId    = $Matches.id
+            $title      = $Matches.title
+            $uploadDate = $Matches.date
+        } else {
+            $videoId = $null; $title = $null; $uploadDate = $null
+        }
+        $originalUrl = $null
+        $channelUrl  = $null
+        $shortUrl    = if ($videoId) { "https://youtu.be/$videoId" } else { $null }
+        $embedUrl    = $null
+        $playlistUrl = $null
+    }
 
     # --- URL metadata file (#12) ---
     $urlData = [ordered]@{
@@ -52,8 +78,8 @@ try {
         embed_url       = $embedUrl
         channel_url     = $channelUrl
         playlist_url    = $playlistUrl
-        playlist_id     = $info.playlist_id
-        playlist_title  = $info.playlist_title
+        playlist_id     = if ($info) { $info.playlist_id } else { $null }
+        playlist_title  = if ($info) { $info.playlist_title } else { $null }
     }
     $urlData | ConvertTo-Json | Set-Content (Join-Path $urlsDir "urls.json")
     Log "Wrote URL metadata file."
