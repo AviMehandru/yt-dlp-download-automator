@@ -9,12 +9,12 @@ param(
 $PSNativeCommandUseErrorActionPreference = $false
 
 $dataRoot        = "C:/yt-dlp"
-$scriptsRoot     = "C:/yt-dlp/scripts"
+$configsRoot     = "C:/yt-dlp/configs"
 $logFile         = Join-Path $dataRoot "download.log"
 $historyDir      = Join-Path $dataRoot "Archive History"
 $archiveFile     = Join-Path $dataRoot "archive.txt"
 $globalManifest  = Join-Path $dataRoot "Youtube Videos/global_manifest.json"
-$confFile        = Join-Path $scriptsRoot "yt-dlp.conf"
+$confFile        = Join-Path $configsRoot "yt-dlp.conf"
 
 if (!(Test-Path $historyDir)) { New-Item -ItemType Directory -Path $historyDir -Force | Out-Null }
 

@@ -82,9 +82,17 @@ try {
     $mainDownloadLog = "C:/yt-dlp/download.log"
     $completeLogFile = Join-Path $logsDir "video_complete.log"
     if ($videoId -and (Test-Path $mainDownloadLog)) {
-        Select-String -Path $mainDownloadLog -Pattern ([regex]::Escape($videoId)) -SimpleMatch |
-            ForEach-Object { $_.Line } | Set-Content -Path $completeLogFile
+        $matchedLines = Select-String -Path $mainDownloadLog -Pattern ([regex]::Escape($videoId)) -SimpleMatch | ForEach-Object { $_.Line }
+        $matchedLines | Set-Content -Path $completeLogFile
         Log "Wrote video_complete.log."
+
+        # Surface comment-fetch problems specifically, since they can fail
+        # quietly enough to be easy to miss in the full console output.
+        $commentIssues = $matchedLines | Where-Object { $_ -match '(?i)comment' -and $_ -match '(?i)(warn|error|unable|fail)' }
+        if ($commentIssues) {
+            Log "WARNING: $($commentIssues.Count) comment-related warning/error line(s) for this video (full text in video_complete.log):"
+            foreach ($line in $commentIssues) { Log "  $line" }
+        }
     } else {
         Log "WARNING: Could not build video_complete.log (no video id, or download.log not found)."
     }
@@ -135,7 +143,7 @@ try {
     Log "Wrote checksums for $($fileList.Count) files."
 
     # --- Config version, tool versions ---
-    $confPath = "C:/yt-dlp/scripts/yt-dlp.conf"
+    $confPath = "C:/yt-dlp/configs/yt-dlp.conf"
     $configVersion = $null
     if (Test-Path $confPath) {
         $m = Select-String -Path $confPath -Pattern "CONFIG_VERSION:\s*(\S+)" | Select-Object -First 1
