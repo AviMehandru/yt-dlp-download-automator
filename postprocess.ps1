@@ -22,7 +22,7 @@ try {
         if (!(Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
     }
 
-    $logFile = Join-Path $logsDir "video.log"
+    $logFile = Join-Path $logsDir "video_postprocessing.log"
     function Log($msg) {
         $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg
         Add-Content -Path $logFile -Value $line
@@ -71,6 +71,24 @@ try {
         $playlistUrl = $null
     }
 
+    # --- Per-video copy of the full yt-dlp console output (#9) ---
+    # download.log is shared/cumulative across every video and every run, so
+    # this pulls out just the lines that mention this video's ID -- which in
+    # practice is nearly every line for this video, since our output template
+    # embeds the ID in every filename yt-dlp logs. This is a best-effort
+    # filter by content match, not a true session-boundary extract, so an
+    # unrelated line that happens to contain the same text is theoretically
+    # possible but very unlikely given YouTube's ID format.
+    $mainDownloadLog = "C:/yt-dlp/download.log"
+    $completeLogFile = Join-Path $logsDir "video_complete.log"
+    if ($videoId -and (Test-Path $mainDownloadLog)) {
+        Select-String -Path $mainDownloadLog -Pattern ([regex]::Escape($videoId)) -SimpleMatch |
+            ForEach-Object { $_.Line } | Set-Content -Path $completeLogFile
+        Log "Wrote video_complete.log."
+    } else {
+        Log "WARNING: Could not build video_complete.log (no video id, or download.log not found)."
+    }
+
     # --- URL metadata file (#12) ---
     $urlData = [ordered]@{
         original_url   = $originalUrl
@@ -117,7 +135,7 @@ try {
     Log "Wrote checksums for $($fileList.Count) files."
 
     # --- Config version, tool versions ---
-    $confPath = "C:/yt-dlp/yt-dlp.conf"
+    $confPath = "C:/yt-dlp/scripts/yt-dlp.conf"
     $configVersion = $null
     if (Test-Path $confPath) {
         $m = Select-String -Path $confPath -Pattern "CONFIG_VERSION:\s*(\S+)" | Select-Object -First 1
@@ -221,6 +239,31 @@ try {
     }
     catch {
         Log "WARNING: Channel Info refresh failed: $($_.Exception.Message)"
+    }
+
+    # --- Trim empty leftover folders under _incomplete (#5) ---
+    # yt-dlp mirrors the full per-video folder structure into the temp path
+    # (same uploader/date/id/title nesting as the final destination), but it
+    # has no built-in cleanup for the now-empty folders left behind once
+    # files are moved to their final home. This is a known, unresolved
+    # yt-dlp limitation (see yt-dlp/yt-dlp#11674), not something a config
+    # flag can fix, so we sweep it ourselves after every video.
+    try {
+        $incompleteRoot = "C:/yt-dlp/Youtube Videos/_incomplete"
+        if (Test-Path $incompleteRoot) {
+            do {
+                $removed = 0
+                Get-ChildItem -Path $incompleteRoot -Recurse -Directory -ErrorAction SilentlyContinue |
+                    Where-Object { -not (Get-ChildItem -Path $_.FullName -Force -ErrorAction SilentlyContinue | Select-Object -First 1) } |
+                    ForEach-Object {
+                        Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue
+                        $removed++
+                    }
+            } while ($removed -gt 0)
+            Log "Swept empty folders under _incomplete."
+        }
+    } catch {
+        Log "WARNING: Empty-folder sweep under _incomplete failed: $($_.Exception.Message)"
     }
 
     Log "Post-processing complete."
