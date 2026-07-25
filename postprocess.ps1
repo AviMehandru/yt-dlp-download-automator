@@ -72,29 +72,43 @@ try {
     }
 
     # --- Per-video copy of the full yt-dlp console output (#9) ---
-    # download.log is shared/cumulative across every video and every run, so
-    # this pulls out just the lines that mention this video's ID -- which in
-    # practice is nearly every line for this video, since our output template
-    # embeds the ID in every filename yt-dlp logs. This is a best-effort
-    # filter by content match, not a true session-boundary extract, so an
-    # unrelated line that happens to contain the same text is theoretically
-    # possible but very unlikely given YouTube's ID format.
-    $mainDownloadLog = "C:/yt-dlp/download.log"
+    # download.log is shared/cumulative across every run. postprocess.ps1
+    # runs mid-session (via the after_move hook, before yt-dlp itself
+    # finishes and writes the "session finished" marker), so everything
+    # from the most recent "session started" marker up to this exact
+    # moment is an exact, unedited copy of this run's console output.
+    # NOTE: this captures the whole session, not just one video -- for a
+    # playlist/channel URL covering several videos in one run, each
+    # video's video_complete.log would contain everything processed so
+    # far in that session, not just its own portion. Exact per-video
+    # boundaries aren't available for multi-video sessions since yt-dlp
+    # doesn't mark them. This matches how you actually run it (one URL
+    # per invocation), where it's a perfect 1:1 copy.
+    $mainDownloadLog = "C:/yt-dlp/Archive Logs/Logs/download.log"
     $completeLogFile = Join-Path $logsDir "video_complete.log"
-    if ($videoId -and (Test-Path $mainDownloadLog)) {
-        $matchedLines = Select-String -Path $mainDownloadLog -Pattern ([regex]::Escape($videoId)) -SimpleMatch | ForEach-Object { $_.Line }
-        $matchedLines | Set-Content -Path $completeLogFile
-        Log "Wrote video_complete.log."
+    $sessionLines = $null
+    if (Test-Path $mainDownloadLog) {
+        $allLines = Get-Content -Path $mainDownloadLog
+        $startMatch = $allLines | Select-String -Pattern '^==== Download session started' | Select-Object -Last 1
+        if ($startMatch) {
+            $sessionLines = $allLines[($startMatch.LineNumber - 1)..($allLines.Count - 1)]
+            $sessionLines | Set-Content -Path $completeLogFile
+            Log "Wrote video_complete.log (exact copy of this session from download.log)."
+        } else {
+            Log "WARNING: No session-start marker found in download.log; video_complete.log not written."
+        }
+    } else {
+        Log "WARNING: download.log not found at $mainDownloadLog; video_complete.log not written."
+    }
 
-        # Surface comment-fetch problems specifically, since they can fail
-        # quietly enough to be easy to miss in the full console output.
-        $commentIssues = $matchedLines | Where-Object { $_ -match '(?i)comment' -and $_ -match '(?i)(warn|error|unable|fail)' }
+    # Surface comment-fetch problems specifically, since they can fail
+    # quietly enough to be easy to miss in the full console output.
+    if ($sessionLines) {
+        $commentIssues = $sessionLines | Where-Object { $_ -match '(?i)comment' -and $_ -match '(?i)(warn|error|unable|fail)' }
         if ($commentIssues) {
             Log "WARNING: $($commentIssues.Count) comment-related warning/error line(s) for this video (full text in video_complete.log):"
             foreach ($line in $commentIssues) { Log "  $line" }
         }
-    } else {
-        Log "WARNING: Could not build video_complete.log (no video id, or download.log not found)."
     }
 
     # --- URL metadata file (#12) ---
@@ -124,6 +138,35 @@ try {
     $subLangs = @()
     if ($info.requested_subtitles) {
         $subLangs = $info.requested_subtitles.PSObject.Properties.Name
+    }
+
+    # --- Preserve the original-format thumbnail alongside the converted PNG ---
+    # yt-dlp's --convert-thumbnails replaces the on-disk file rather than
+    # keeping both, so this re-fetches the original straight from its
+    # source URL (already known from info.json) and saves it next to the
+    # PNG with the same base filename, distinguished only by extension.
+    try {
+        $imagesDir = Join-Path $videoDir "Images"
+        $pngThumb = Get-ChildItem -Path $imagesDir -Filter "*.png" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($pngThumb -and $info -and $info.thumbnail) {
+            $resp = Invoke-WebRequest -Uri $info.thumbnail -Method Get -ErrorAction Stop
+            $ext = "jpg"
+            $ct = $resp.Headers["Content-Type"]
+            if ($ct -match "webp") { $ext = "webp" }
+            elseif ($ct -match "png") { $ext = "png" }
+            elseif ($ct -match "jpeg") { $ext = "jpg" }
+            if ($ext -ne "png") {
+                $origThumbPath = Join-Path $imagesDir "$($pngThumb.BaseName).$ext"
+                [System.IO.File]::WriteAllBytes($origThumbPath, $resp.Content)
+                Log "Preserved original-format thumbnail: $origThumbPath"
+            } else {
+                Log "Thumbnail source was already PNG -- no separate original-format copy needed."
+            }
+        } elseif (-not $pngThumb) {
+            Log "WARNING: No PNG thumbnail found in $imagesDir -- skipped preserving original-format copy."
+        }
+    } catch {
+        Log "WARNING: Could not preserve original-format thumbnail: $($_.Exception.Message)"
     }
 
     # --- Every file + hash under the video folder ---
