@@ -101,15 +101,9 @@ try {
         Log "WARNING: download.log not found at $mainDownloadLog; video_complete.log not written."
     }
 
-    # Surface comment-fetch problems specifically, since they can fail
-    # quietly enough to be easy to miss in the full console output.
-    if ($sessionLines) {
-        $commentIssues = $sessionLines | Where-Object { $_ -match '(?i)comment' -and $_ -match '(?i)(warn|error|unable|fail)' }
-        if ($commentIssues) {
-            Log "WARNING: $($commentIssues.Count) comment-related warning/error line(s) for this video (full text in video_complete.log):"
-            foreach ($line in $commentIssues) { Log "  $line" }
-        }
-    }
+    # Comments are now fetched by a separate pass below, after the video/
+    # audio/subtitles are already safely downloaded -- see that section for
+    # why, and for where comment-fetch issues get logged instead.
 
     # --- URL metadata file (#12) ---
     $urlData = [ordered]@{
@@ -167,6 +161,64 @@ try {
         }
     } catch {
         Log "WARNING: Could not preserve original-format thumbnail: $($_.Exception.Message)"
+    }
+
+    # --- Comments: separate pass, run last on purpose ---
+    # See the config comment near --continue for why this isn't part of the
+    # main download. This re-extracts the video (unavoidable -- yt-dlp has
+    # no "comments only" mode that skips extraction) purely to fetch
+    # comments, then merges them into the sidecar info.json already saved
+    # from the main download. Note this does NOT reach the copy of
+    # info.json already embedded inside the .mkv via --embed-info-json --
+    # that embed happened during the main pass, before comments existed.
+    # Only the sidecar info.json file on disk gets the comments added.
+    # This can also take 30-60+ minutes on a heavily-commented video; it
+    # doesn't make the video finish any faster overall, it just makes sure
+    # everything expiry-sensitive is safe before comments are attempted.
+    try {
+        if ($originalUrl -and $infoJsonFile) {
+            $commentsTempDir = Join-Path $videoMetaDir "_comments_temp"
+            if (!(Test-Path $commentsTempDir)) { New-Item -ItemType Directory -Path $commentsTempDir -Force | Out-Null }
+
+            $commentsOutput = & yt-dlp `
+                --ignore-config `
+                --skip-download `
+                --write-comments `
+                --write-info-json `
+                --extractor-retries 100 `
+                --retry-sleep "extractor:exp=1:30:2" `
+                --sleep-requests 2 `
+                -o (Join-Path $commentsTempDir "comments.%(ext)s") `
+                $originalUrl 2>&1
+            $commentsOutput | ForEach-Object { Log "  [comments] $_" }
+
+            $commentIssues = $commentsOutput | Where-Object { $_ -match '(?i)(warn|error|unable|fail)' }
+            if ($commentIssues) {
+                Log "WARNING: $($commentIssues.Count) issue(s) during the comments pass (see [comments] lines above)."
+            }
+
+            $commentsInfoFile = Get-ChildItem -Path $commentsTempDir -Filter "*.info.json" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($commentsInfoFile) {
+                $commentsInfo = Get-Content $commentsInfoFile.FullName -Raw | ConvertFrom-Json
+                if ($commentsInfo.comments) {
+                    $mainInfoRaw = Get-Content $infoJsonFile.FullName -Raw | ConvertFrom-Json
+                    $mainInfoRaw | Add-Member -NotePropertyName comments -NotePropertyValue $commentsInfo.comments -Force
+                    $mainInfoRaw | Add-Member -NotePropertyName comment_count -NotePropertyValue $commentsInfo.comment_count -Force
+                    $mainInfoRaw | ConvertTo-Json -Depth 20 | Set-Content $infoJsonFile.FullName
+                    Log "Merged $($commentsInfo.comments.Count) comments into the sidecar info.json."
+                } else {
+                    Log "WARNING: Comments pass completed but returned no comments -- nothing to merge."
+                }
+            } else {
+                Log "WARNING: Comments pass produced no usable info.json -- comments not merged."
+            }
+
+            Remove-Item -Path $commentsTempDir -Recurse -Force -ErrorAction SilentlyContinue
+        } else {
+            Log "WARNING: No original_url or main info.json available -- skipped the comments pass entirely."
+        }
+    } catch {
+        Log "WARNING: Comments pass failed: $($_.Exception.Message)"
     }
 
     # --- Every file + hash under the video folder ---
