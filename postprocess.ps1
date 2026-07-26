@@ -221,6 +221,48 @@ try {
         Log "WARNING: Comments pass failed: $($_.Exception.Message)"
     }
 
+    # --- Re-embed the (now comment-complete) info.json into the .mkv ---
+    # This is what --embed-info-json would normally do, done manually and
+    # deferred until after the comments merge above. ffmpeg attaches the
+    # updated info.json to the existing file -- -map 0 -c copy means this
+    # is a container-level change only, no video/audio re-encoding, and it
+    # preserves whatever's already attached (e.g. the embedded thumbnail).
+    # Writes to a temp file first and only swaps it in on success, so a
+    # failed remux can never leave you with a damaged or missing video.
+    try {
+        if ($FilePath -match '\.mkv$' -and $infoJsonFile) {
+            # Count existing attachment-type streams so the mimetype tag
+            # below targets ONLY the new one we're adding. Without an
+            # explicit index, ffmpeg's "s:t" specifier matches every
+            # attachment stream, which would mislabel the already-embedded
+            # thumbnail as application/json too.
+            $existingAttachCount = 0
+            $probeOutput = & ffprobe -v error -select_streams t -show_entries stream=index -of csv=p=0 $FilePath 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $existingAttachCount = @($probeOutput | Where-Object { $_ -match '^\d+$' }).Count
+            } else {
+                Log "WARNING: ffprobe attachment count failed, assuming 0 existing attachments: $probeOutput"
+            }
+
+            $remuxTemp = Join-Path $finalFilesDir ("_remux_temp_{0}.mkv" -f ([guid]::NewGuid().ToString("N")))
+            $ffmpegOutput = & ffmpeg -y -i $FilePath -attach $infoJsonFile.FullName -metadata:s:t:$existingAttachCount "mimetype=application/json" -map 0 -c copy $remuxTemp 2>&1
+            $ffmpegOutput | ForEach-Object { Log "  [ffmpeg-reembed] $_" }
+
+            if ((Test-Path $remuxTemp) -and (Get-Item $remuxTemp).Length -gt 0) {
+                Remove-Item -Path $FilePath -Force
+                Move-Item -Path $remuxTemp -Destination $FilePath -Force
+                Log "Re-embedded comment-complete info.json into $FilePath."
+            } else {
+                Log "WARNING: Re-embed produced no output file -- original left untouched. Comments are still in the sidecar info.json, just not embedded in the .mkv."
+                Remove-Item -Path $remuxTemp -Force -ErrorAction SilentlyContinue
+            }
+        } elseif ($FilePath -notmatch '\.mkv$') {
+            Log "Skipped info.json re-embed: output file isn't .mkv ($FilePath)."
+        }
+    } catch {
+        Log "WARNING: Re-embed of info.json failed: $($_.Exception.Message). Original file left untouched; comments are still in the sidecar info.json."
+    }
+
     # --- Every file + hash under the video folder ---
     $allFiles = Get-ChildItem -Path $videoDir -Recurse -File
     $fileHashes = [ordered]@{}
