@@ -2,10 +2,10 @@ param(
     [Parameter(Mandatory = $true)][string]$Url
 )
 
-# On PowerShell 7.3+, native-command stderr lines get wrapped as ErrorRecord
-# objects when redirected (2>&1 below), which prints/logs them as noisy
-# "NativeCommandError" blocks instead of yt-dlp's plain warning/error text.
-# This restores plain-text passthrough. Harmless no-op on older PowerShell.
+# On PowerShell 7.3+ (which this now runs under), native-command stderr
+# lines get wrapped as ErrorRecord objects when redirected (2>&1 below),
+# which prints/logs them as noisy "NativeCommandError" blocks instead of
+# yt-dlp's plain warning/error text. This restores plain-text passthrough.
 $PSNativeCommandUseErrorActionPreference = $false
 
 $dataRoot        = "C:/yt-dlp"

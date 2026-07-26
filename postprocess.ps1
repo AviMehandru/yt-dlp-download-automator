@@ -139,11 +139,19 @@ try {
     # keeping both, so this re-fetches the original straight from its
     # source URL (already known from info.json) and saves it next to the
     # PNG with the same base filename, distinguished only by extension.
+    # Downloads straight to disk with -OutFile rather than reading .Content
+    # into memory -- -OutFile writes binary responses correctly without
+    # depending on how Invoke-WebRequest happens to type .Content, and
+    # -PassThru still gets us the response object (for Content-Type) in
+    # the same call. No -UseBasicParsing needed under pwsh: that switch
+    # only ever existed to avoid Windows PowerShell's IE-engine HTML
+    # parsing, which pwsh's Invoke-WebRequest never uses in the first place.
     try {
         $imagesDir = Join-Path $videoDir "Images"
         $pngThumb = Get-ChildItem -Path $imagesDir -Filter "*.png" -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($pngThumb -and $info -and $info.thumbnail) {
-            $resp = Invoke-WebRequest -Uri $info.thumbnail -Method Get -UseBasicParsing -ErrorAction Stop
+            $rawThumbTemp = Join-Path $imagesDir ("_thumb_temp_{0}" -f ([guid]::NewGuid().ToString("N")))
+            $resp = Invoke-WebRequest -Uri $info.thumbnail -Method Get -OutFile $rawThumbTemp -PassThru -ErrorAction Stop
             $ext = "jpg"
             $ct = $resp.Headers["Content-Type"]
             if ($ct -match "webp") { $ext = "webp" }
@@ -151,9 +159,10 @@ try {
             elseif ($ct -match "jpeg") { $ext = "jpg" }
             if ($ext -ne "png") {
                 $origThumbPath = Join-Path $imagesDir "$($pngThumb.BaseName).$ext"
-                [System.IO.File]::WriteAllBytes($origThumbPath, $resp.Content)
+                Move-Item -Path $rawThumbTemp -Destination $origThumbPath -Force
                 Log "Preserved original-format thumbnail: $origThumbPath"
             } else {
+                Remove-Item -Path $rawThumbTemp -Force -ErrorAction SilentlyContinue
                 Log "Thumbnail source was already PNG -- no separate original-format copy needed."
             }
         } elseif (-not $pngThumb) {
