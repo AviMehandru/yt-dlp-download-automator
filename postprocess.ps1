@@ -143,7 +143,7 @@ try {
         $imagesDir = Join-Path $videoDir "Images"
         $pngThumb = Get-ChildItem -Path $imagesDir -Filter "*.png" -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($pngThumb -and $info -and $info.thumbnail) {
-            $resp = Invoke-WebRequest -Uri $info.thumbnail -Method Get -ErrorAction Stop
+            $resp = Invoke-WebRequest -Uri $info.thumbnail -Method Get -UseBasicParsing -ErrorAction Stop
             $ext = "jpg"
             $ct = $resp.Headers["Content-Type"]
             if ($ct -match "webp") { $ext = "webp" }
