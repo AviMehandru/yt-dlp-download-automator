@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Usage: ytdl <youtube-url>
+#
+# Unlike the Windows .bat version, bash doesn't need any special handling
+# here for a URL containing "=" (e.g. ...watch?v=abc123) -- that was a
+# cmd.exe-specific quirk (it treats "=" as an argument delimiter alongside
+# spaces). Bash only splits unquoted arguments on whitespace, so plain "$1"
+# is already safe.
+pwsh -NoProfile -File "/home/YOUR_USERNAME/yt-dlp/scripts/run_ytdlp.ps1" -Url "$1"
