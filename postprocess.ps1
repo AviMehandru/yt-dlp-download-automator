@@ -324,7 +324,14 @@ try {
     Log "Wrote manifest.json."
 
     # --- Copy final file to Pure Video (replaces old copy_to_pure.bat) ---
-    $destFile = Join-Path $pureVideoDir (Split-Path $FilePath -Leaf)
+    # $FilePath's own filename is now a short generic name (Final Video.mkv)
+    # since the folder already carries the full descriptive name -- Pure
+    # Video specifically wants the full name on the file itself, so this is
+    # built from the folder name (already yt-dlp-sanitized) rather than
+    # reusing $FilePath's leaf, and rather than reconstructing from the raw
+    # (unsanitized) info.json title field.
+    $pureVideoFileName = (Split-Path $videoDir -Leaf) + [System.IO.Path]::GetExtension($FilePath)
+    $destFile = Join-Path $pureVideoDir $pureVideoFileName
     Copy-Item -Path $FilePath -Destination $destFile -Force
     Log "Copied final file to Pure Video: $destFile"
 
