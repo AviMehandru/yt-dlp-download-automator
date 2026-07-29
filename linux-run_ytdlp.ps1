@@ -8,8 +8,8 @@ param(
 # This restores plain-text passthrough. Applies the same on Linux as Windows.
 $PSNativeCommandUseErrorActionPreference = $false
 
-$dataRoot        = "/home/YOUR_USERNAME/yt-dlp"
-$configsRoot     = "/home/YOUR_USERNAME/yt-dlp/configs"
+$dataRoot        = "/home/linuxisthebest/yt-dlp"
+$configsRoot     = "/home/linuxisthebest/yt-dlp/configs"
 $archiveLogsRoot = Join-Path $dataRoot "Archive Logs"
 $historyDir      = Join-Path $archiveLogsRoot "Archive History"
 $logsDir         = Join-Path $archiveLogsRoot "Logs"

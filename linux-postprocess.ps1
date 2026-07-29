@@ -84,7 +84,7 @@ try {
     # boundaries aren't available for multi-video sessions since yt-dlp
     # doesn't mark them. This matches how you actually run it (one URL
     # per invocation), where it's a perfect 1:1 copy.
-    $mainDownloadLog = "/home/YOUR_USERNAME/yt-dlp/Archive Logs/Logs/download.log"
+    $mainDownloadLog = "/home/linuxisthebest/yt-dlp/Archive Logs/Logs/download.log"
     $completeLogFile = Join-Path $logsDir "video_complete.log"
     $sessionLines = $null
     if (Test-Path $mainDownloadLog) {
@@ -289,7 +289,7 @@ try {
     Log "Wrote checksums for $($fileList.Count) files."
 
     # --- Config version, tool versions ---
-    $confPath = "/home/YOUR_USERNAME/yt-dlp/configs/yt-dlp.conf"
+    $confPath = "/home/linuxisthebest/yt-dlp/configs/yt-dlp.conf"
     $configVersion = $null
     if (Test-Path $confPath) {
         $m = Select-String -Path $confPath -Pattern "CONFIG_VERSION:\s*(\S+)" | Select-Object -First 1
@@ -416,7 +416,7 @@ try {
     # yt-dlp limitation (see yt-dlp/yt-dlp#11674), not something a config
     # flag can fix, so we sweep it ourselves after every video.
     try {
-        $incompleteRoot = "/home/YOUR_USERNAME/yt-dlp/Youtube Videos/_incomplete"
+        $incompleteRoot = "/home/linuxisthebest/yt-dlp/Youtube Videos/_incomplete"
         if (Test-Path $incompleteRoot) {
             do {
                 $removed = 0
