@@ -1,5 +1,7 @@
 # Setting Up the yt-dlp Archival Pipeline on a Fresh Linux VM
 
+> **Shortcut:** `setup.sh` (attached alongside the four pipeline files) automates every step below (1 through 8) in one run. Place it in the same folder as `linux-ytdl`, `linux-run_ytdlp.ps1`, `linux-postprocess.ps1`, and `linux-yt-dlp.conf`, then run `chmod +x setup.sh && ./setup.sh`. It's idempotent -- safe to re-run if it stops partway through. The manual steps below are still here for reference, or if you want to run things by hand.
+
 This assumes a fresh **Ubuntu 26.04** VM running as a guest under **VMware
 Workstation Pro** (matches the `apt`-based dependency checks baked into
 `linux-run_ytdlp.ps1`). The scripts are hardcoded to the username

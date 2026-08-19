@@ -408,6 +408,50 @@ try {
         Log "WARNING: Channel Info refresh failed: $($_.Exception.Message)"
     }
 
+    # --- Sync the "Final Video" per-channel repository ---
+    # A separate, flat "finished output" tree at Youtube Videos/Final Video/
+    # <uploader>/, parallel to Complete Archive -- meant as the one place
+    # to point a media player or another machine at, without pulling in
+    # the full per-video folder tree (subtitles/description/checksums/etc)
+    # that Complete Archive carries for every video. Distinct in purpose
+    # from Pure Video (which exists purely to hold the plain video file,
+    # nothing else): this also carries a synced copy of that channel's
+    # manifest and Channel Info assets, refreshed every run, plus a
+    # synced copy of the global manifest at the repository root.
+    try {
+        $finalVideoRoot        = Join-Path $youtubeRoot "Final Video"
+        $finalVideoChannelDir  = Join-Path $finalVideoRoot $uploader
+        if (!(Test-Path $finalVideoChannelDir)) {
+            New-Item -ItemType Directory -Path $finalVideoChannelDir -Force | Out-Null
+        }
+
+        # Same full-descriptive-name convention as Pure Video, and for the
+        # same reason: built from the already-sanitized folder name rather
+        # than reconstructed from raw (unsanitized) info.json fields.
+        $finalVideoFileName = (Split-Path $videoDir -Leaf) + [System.IO.Path]::GetExtension($FilePath)
+        Copy-Item -Path $FilePath -Destination (Join-Path $finalVideoChannelDir $finalVideoFileName) -Force
+
+        if (Test-Path $channelManifestPath) {
+            Copy-Item -Path $channelManifestPath -Destination (Join-Path $finalVideoChannelDir "channel_manifest.json") -Force
+        }
+
+        if (Test-Path $channelInfoDir) {
+            $finalVideoChannelInfoDir = Join-Path $finalVideoChannelDir "Channel Info"
+            if (Test-Path $finalVideoChannelInfoDir) {
+                Remove-Item -Path $finalVideoChannelInfoDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            Copy-Item -Path $channelInfoDir -Destination $finalVideoChannelInfoDir -Recurse -Force
+        }
+
+        if (Test-Path $globalManifestPath) {
+            Copy-Item -Path $globalManifestPath -Destination (Join-Path $finalVideoRoot "global_manifest.json") -Force
+        }
+
+        Log "Synced Final Video repository for $uploader."
+    } catch {
+        Log "WARNING: Failed to sync Final Video repository: $($_.Exception.Message)"
+    }
+
     # --- Trim empty leftover folders under _incomplete (#5) ---
     # yt-dlp mirrors the full per-video folder structure into the temp path
     # (same uploader/date/id/title nesting as the final destination), but it

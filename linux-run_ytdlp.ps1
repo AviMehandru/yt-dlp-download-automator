@@ -10,16 +10,49 @@ $PSNativeCommandUseErrorActionPreference = $false
 
 $dataRoot        = "/home/linuxisthebest/yt-dlp"
 $configsRoot     = "/home/linuxisthebest/yt-dlp/configs"
+$scriptsRoot     = "/home/linuxisthebest/yt-dlp/scripts"
 $archiveLogsRoot = Join-Path $dataRoot "Archive Logs"
 $historyDir      = Join-Path $archiveLogsRoot "Archive History"
 $logsDir         = Join-Path $archiveLogsRoot "Logs"
 $logFile         = Join-Path $logsDir "download.log"
 $archiveFile     = Join-Path $logsDir "archive.txt"
-$globalManifest  = Join-Path $dataRoot "Youtube Videos/global_manifest.json"
+$videosRoot      = Join-Path $dataRoot "Youtube Videos"
+$globalManifest  = Join-Path $videosRoot "global_manifest.json"
 $confFile        = Join-Path $configsRoot "yt-dlp.conf"
 
-foreach ($d in @($historyDir, $logsDir)) {
-    if (!(Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+# --- Self-heal the folder structure (runs every invocation) ---
+# If the whole tree (or any part of it) ever gets wiped -- a clean re-clone,
+# an accidental rm -rf, starting fresh on a new disk -- this recreates every
+# structural folder the pipeline depends on before doing anything else, so
+# a wipe doesn't require re-running the setup guide's mkdir steps by hand.
+# Deliberately does NOT touch anything inside "Complete Archive" itself
+# (each video's own folder is created on demand by yt-dlp's -o templates);
+# this only guarantees the fixed, top-level scaffolding exists.
+#
+# $logsDir is created FIRST, and on its own, specifically so $logFile (which
+# lives inside it) is guaranteed to already have a parent directory before
+# any of the folder-recreation messages below try to log to it.
+$recreatedFolders = @()
+if (!(Test-Path $logsDir)) {
+    New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
+    $recreatedFolders += $logsDir
+}
+foreach ($d in @(
+    $scriptsRoot,
+    $configsRoot,
+    $historyDir,
+    (Join-Path $videosRoot "Complete Archive"),
+    (Join-Path $videosRoot "_incomplete"),
+    (Join-Path $videosRoot "Pure Video"),
+    (Join-Path $videosRoot "Final Video")
+)) {
+    if (!(Test-Path $d)) {
+        New-Item -ItemType Directory -Path $d -Force | Out-Null
+        $recreatedFolders += $d
+    }
+}
+foreach ($d in $recreatedFolders) {
+    "Recreated missing folder: $d" | Tee-Object -FilePath $logFile -Append
 }
 
 $timestamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
