@@ -134,42 +134,42 @@ try {
         $subLangs = $info.requested_subtitles.PSObject.Properties.Name
     }
 
-    # --- Preserve the original-format thumbnail alongside the converted PNG ---
-    # yt-dlp's --convert-thumbnails replaces the on-disk file rather than
-    # keeping both, so this re-fetches the original straight from its
-    # source URL (already known from info.json) and saves it next to the
-    # PNG with the same base filename, distinguished only by extension.
-    # Downloads straight to disk with -OutFile rather than reading .Content
-    # into memory -- -OutFile writes binary responses correctly without
-    # depending on how Invoke-WebRequest happens to type .Content, and
-    # -PassThru still gets us the response object (for Content-Type) in
-    # the same call. No -UseBasicParsing needed under pwsh: that switch
-    # only ever existed to avoid Windows PowerShell's IE-engine HTML
-    # parsing, which pwsh's Invoke-WebRequest never uses in the first place.
+    # --- Generate the PNG thumbnail locally from the already-downloaded original ---
+    # yt-dlp.conf no longer runs --convert-thumbnails, so the file already
+    # sitting in Images/ IS the original, untouched, native-format thumbnail
+    # exactly as it existed at extraction time (webp/jpg/etc) -- nothing
+    # needs to be "preserved" via a network re-fetch anymore.
+    #
+    # This used to re-fetch info.thumbnail's URL here, late in the pipeline
+    # (after the whole video finished downloading, which can be a long
+    # time later). That URL is LIVE, not a snapshot -- if the uploader
+    # changed the video's thumbnail mid-download, that re-fetch silently
+    # pulled back a DIFFERENT image than the one actually embedded/used,
+    # producing an "original" copy that didn't match the PNG at all. Doing
+    # the PNG conversion locally, from the file yt-dlp already saved,
+    # guarantees both copies are pixel-identical derivatives of the same
+    # bytes captured at extraction time -- no network call, no race window.
     try {
         $imagesDir = Join-Path $videoDir "Images"
-        $pngThumb = Get-ChildItem -Path $imagesDir -Filter "*.png" -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($pngThumb -and $info -and $info.thumbnail) {
-            $rawThumbTemp = Join-Path $imagesDir ("_thumb_temp_{0}" -f ([guid]::NewGuid().ToString("N")))
-            $resp = Invoke-WebRequest -Uri $info.thumbnail -Method Get -OutFile $rawThumbTemp -PassThru -ErrorAction Stop
-            $ext = "jpg"
-            $ct = $resp.Headers["Content-Type"]
-            if ($ct -match "webp") { $ext = "webp" }
-            elseif ($ct -match "png") { $ext = "png" }
-            elseif ($ct -match "jpeg") { $ext = "jpg" }
-            if ($ext -ne "png") {
-                $origThumbPath = Join-Path $imagesDir "$($pngThumb.BaseName).$ext"
-                Move-Item -Path $rawThumbTemp -Destination $origThumbPath -Force
-                Log "Preserved original-format thumbnail: $origThumbPath"
+        $rawThumb = Get-ChildItem -Path $imagesDir -Filter "Thumbnail.*" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -ne ".png" } | Select-Object -First 1
+        if ($rawThumb) {
+            $pngPath = Join-Path $imagesDir "Thumbnail.png"
+            if (!(Test-Path $pngPath)) {
+                $ffmpegThumbOutput = & ffmpeg -y -i $rawThumb.FullName $pngPath 2>&1
+                if ((Test-Path $pngPath) -and (Get-Item $pngPath).Length -gt 0) {
+                    Log "Generated Thumbnail.png locally from $($rawThumb.Name) (no network re-fetch involved)."
+                } else {
+                    Log "WARNING: Local PNG conversion of $($rawThumb.Name) failed: $ffmpegThumbOutput"
+                }
             } else {
-                Remove-Item -Path $rawThumbTemp -Force -ErrorAction SilentlyContinue
-                Log "Thumbnail source was already PNG -- no separate original-format copy needed."
+                Log "Thumbnail.png already present -- skipped local conversion."
             }
-        } elseif (-not $pngThumb) {
-            Log "WARNING: No PNG thumbnail found in $imagesDir -- skipped preserving original-format copy."
+        } else {
+            Log "WARNING: No raw thumbnail file found in $imagesDir -- nothing to convert to PNG."
         }
     } catch {
-        Log "WARNING: Could not preserve original-format thumbnail: $($_.Exception.Message)"
+        Log "WARNING: Could not generate local PNG thumbnail copy: $($_.Exception.Message)"
     }
 
     # --- Comments: separate pass, run last on purpose ---
