@@ -15,21 +15,11 @@
 
 set -euo pipefail
 
-TARGET_USER="linuxisthebest"
-DATA_ROOT="/home/${TARGET_USER}/yt-dlp"
+TARGET_USER="$(whoami)"
+DATA_ROOT="${HOME}/yt-dlp"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 log() { echo -e "\n>>> $*"; }
-
-if [ "$(whoami)" != "$TARGET_USER" ]; then
-    echo "WARNING: current user is '$(whoami)', not '$TARGET_USER'."
-    echo "The pipeline scripts have '/home/${TARGET_USER}/...' hardcoded."
-    echo "Either re-run this as the '${TARGET_USER}' user, or edit"
-    echo "TARGET_USER at the top of this script AND re-run the same"
-    echo "find-and-replace on the four pipeline files first."
-    read -rp "Continue anyway? [y/N] " reply
-    [[ "$reply" =~ ^[Yy]$ ]] || exit 1
-fi
 
 # --- Step 1: update the system ---
 log "Step 1/9: Updating system packages"

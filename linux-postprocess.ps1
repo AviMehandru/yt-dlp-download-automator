@@ -18,6 +18,17 @@ try {
     $urlsDir       = Join-Path $videoDir "URLs"
     $pureVideoDir  = Join-Path (Join-Path $youtubeRoot "Pure Video") $uploader
 
+    # $dataRoot is the parent of "Youtube Videos" -- derived from $FilePath
+    # itself (via $youtubeRoot above), so this correctly reflects whichever
+    # data root was actually used for THIS run (the default $HOME/yt-dlp,
+    # or a custom -DataRoot passed to run_ytdlp.ps1) without needing that
+    # value passed in separately. $installRoot (where scripts/configs live)
+    # is a different, fixed location -- always $HOME/yt-dlp regardless of
+    # -DataRoot -- so it's resolved independently via $HOME below rather
+    # than derived from $FilePath's ancestry.
+    $dataRoot    = Split-Path $youtubeRoot -Parent
+    $installRoot = Join-Path $HOME "yt-dlp"
+
     foreach ($d in @($logsDir, $urlsDir, $pureVideoDir)) {
         if (!(Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
     }
@@ -84,7 +95,7 @@ try {
     # boundaries aren't available for multi-video sessions since yt-dlp
     # doesn't mark them. This matches how you actually run it (one URL
     # per invocation), where it's a perfect 1:1 copy.
-    $mainDownloadLog = "/home/linuxisthebest/yt-dlp/Archive Logs/Logs/download.log"
+    $mainDownloadLog = Join-Path $dataRoot "Archive Logs/Logs/download.log"
     $completeLogFile = Join-Path $logsDir "video_complete.log"
     $sessionLines = $null
     if (Test-Path $mainDownloadLog) {
@@ -289,7 +300,9 @@ try {
     Log "Wrote checksums for $($fileList.Count) files."
 
     # --- Config version, tool versions ---
-    $confPath = "/home/linuxisthebest/yt-dlp/configs/yt-dlp.conf"
+    # $installRoot (fixed at $HOME/yt-dlp), not $dataRoot -- configs/ lives
+    # with the pipeline install, not with a possibly-custom data root.
+    $confPath = Join-Path $installRoot "configs/yt-dlp.conf"
     $configVersion = $null
     if (Test-Path $confPath) {
         $m = Select-String -Path $confPath -Pattern "CONFIG_VERSION:\s*(\S+)" | Select-Object -First 1
@@ -460,7 +473,9 @@ try {
     # yt-dlp limitation (see yt-dlp/yt-dlp#11674), not something a config
     # flag can fix, so we sweep it ourselves after every video.
     try {
-        $incompleteRoot = "/home/linuxisthebest/yt-dlp/Youtube Videos/_incomplete"
+        # Sibling of "Complete Archive" under $youtubeRoot -- correctly
+        # reflects this run's actual data root (default or custom).
+        $incompleteRoot = Join-Path $youtubeRoot "_incomplete"
         if (Test-Path $incompleteRoot) {
             do {
                 $removed = 0

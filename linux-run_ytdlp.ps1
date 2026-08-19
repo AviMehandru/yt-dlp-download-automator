@@ -1,5 +1,11 @@
 param(
-    [Parameter(Mandatory = $true)][string]$Url
+    [Parameter(Mandatory = $true)][string]$Url,
+    # Optional. If omitted, data lives under $HOME/yt-dlp same as before.
+    # If given, ONLY the data (Archive Logs/, Youtube Videos/) moves here --
+    # the pipeline install itself (scripts/, configs/) always stays at
+    # $HOME/yt-dlp, since ytdl has to know where to find run_ytdlp.ps1 in
+    # the first place, before any argument parsing can happen.
+    [Parameter(Mandatory = $false)][string]$DataRoot = ""
 )
 
 # On PowerShell 7.3+, native-command stderr lines get wrapped as ErrorRecord
@@ -8,26 +14,42 @@ param(
 # This restores plain-text passthrough. Applies the same on Linux as Windows.
 $PSNativeCommandUseErrorActionPreference = $false
 
-$dataRoot        = "/home/linuxisthebest/yt-dlp"
-$configsRoot     = "/home/linuxisthebest/yt-dlp/configs"
-$scriptsRoot     = "/home/linuxisthebest/yt-dlp/scripts"
+# --- Resolve roots ---
+# $HOME is pwsh's own built-in automatic variable, cross-platform since
+# PowerShell Core -- no hardcoded username anywhere, works for whatever
+# account actually runs this.
+$installRoot = Join-Path $HOME "yt-dlp"
+$scriptsRoot = Join-Path $installRoot "scripts"
+$configsRoot = Join-Path $installRoot "configs"
+$confFile    = Join-Path $configsRoot "yt-dlp.conf"
+
+if ([string]::IsNullOrWhiteSpace($DataRoot)) {
+    $dataRoot = $installRoot
+} else {
+    # Resolve to an absolute path up front. A relative path typed at the
+    # shell (e.g. "downloads") would otherwise be interpreted relative to
+    # pwsh's own working directory rather than anything predictable.
+    $dataRoot = [System.IO.Path]::GetFullPath($DataRoot)
+}
+
 $archiveLogsRoot = Join-Path $dataRoot "Archive Logs"
 $historyDir      = Join-Path $archiveLogsRoot "Archive History"
 $logsDir         = Join-Path $archiveLogsRoot "Logs"
 $logFile         = Join-Path $logsDir "download.log"
 $archiveFile     = Join-Path $logsDir "archive.txt"
 $videosRoot      = Join-Path $dataRoot "Youtube Videos"
+$completeArchiveDir = Join-Path $videosRoot "Complete Archive"
+$incompleteDir      = Join-Path $videosRoot "_incomplete"
 $globalManifest  = Join-Path $videosRoot "global_manifest.json"
-$confFile        = Join-Path $configsRoot "yt-dlp.conf"
 
 # --- Self-heal the folder structure (runs every invocation) ---
 # If the whole tree (or any part of it) ever gets wiped -- a clean re-clone,
-# an accidental rm -rf, starting fresh on a new disk -- this recreates every
-# structural folder the pipeline depends on before doing anything else, so
-# a wipe doesn't require re-running the setup guide's mkdir steps by hand.
-# Deliberately does NOT touch anything inside "Complete Archive" itself
-# (each video's own folder is created on demand by yt-dlp's -o templates);
-# this only guarantees the fixed, top-level scaffolding exists.
+# an accidental rm -rf, starting fresh on a new disk, or just the first time
+# a new -DataRoot is used -- this recreates every structural folder the
+# pipeline depends on before doing anything else. Deliberately does NOT
+# touch anything inside "Complete Archive" itself (each video's own folder
+# is created on demand by yt-dlp's -o templates); this only guarantees the
+# fixed, top-level scaffolding exists.
 #
 # $logsDir is created FIRST, and on its own, specifically so $logFile (which
 # lives inside it) is guaranteed to already have a parent directory before
@@ -41,8 +63,8 @@ foreach ($d in @(
     $scriptsRoot,
     $configsRoot,
     $historyDir,
-    (Join-Path $videosRoot "Complete Archive"),
-    (Join-Path $videosRoot "_incomplete"),
+    $completeArchiveDir,
+    $incompleteDir,
     (Join-Path $videosRoot "Pure Video"),
     (Join-Path $videosRoot "Final Video")
 )) {
@@ -58,6 +80,11 @@ foreach ($d in $recreatedFolders) {
 $timestamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
 
 # --- Dependency updates/checks (throttled to once/day, not every run) ---
+# Tied to $installRoot, not $dataRoot -- this is about the TOOLS themselves
+# (yt-dlp/ffmpeg/pwsh), which are shared across every data root you might
+# ever point -DataRoot at, so there's no reason to redo this check just
+# because you switched download destinations.
+#
 # yt-dlp: safe, real, built-in self-update -- yt-dlp -U replaces its own exe
 # in place and is designed for exactly this, identically on Linux. It no-ops
 # harmlessly if yt-dlp was installed via a package manager that doesn't
@@ -73,7 +100,7 @@ $timestamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
 # "apt update" itself, since that needs root and a background video-download
 # script silently invoking sudo is not something to do unattended. Run
 # "sudo apt update" yourself periodically for this check to stay accurate.
-$updateThrottleMarker = Join-Path $dataRoot ".last_dependency_check"
+$updateThrottleMarker = Join-Path $installRoot ".last_dependency_check"
 $updateThrottleHours = 24
 $needsDependencyCheck = $true
 if (Test-Path $updateThrottleMarker) {
@@ -120,12 +147,31 @@ $ffmpegVersion = if ($ffmpegRaw) { ($ffmpegRaw -split "`n")[0] } else { $null }
 "==== Download session started $timestamp ====" | Tee-Object -FilePath $logFile -Append
 "yt-dlp: $ytDlpVersion | ffmpeg: $ffmpegVersion | config version: $configVersion" | Tee-Object -FilePath $logFile -Append
 "URL: $Url" | Tee-Object -FilePath $logFile -Append
+if ($DataRoot) { "Data root override: $dataRoot" | Tee-Object -FilePath $logFile -Append }
 
 # --- Run yt-dlp, capturing stdout AND stderr (warnings/errors) into the log ---
 # --ignore-config stops yt-dlp from also auto-loading any yt-dlp.conf it finds
 # in the current directory, ~/.config/yt-dlp/, or next to the binary. Without
 # it, a stray leftover config file anywhere on the auto-discovery path
 # silently merges its own options (and any --exec lines) into every run.
-& yt-dlp --ignore-config --config-location $confFile $Url 2>&1 | Tee-Object -FilePath $logFile -Append
+#
+# --download-archive, --paths, and --exec are passed here as CLI arguments
+# rather than living inside yt-dlp.conf, specifically so they can vary with
+# -DataRoot. yt-dlp.conf (loaded via --config-location) now only holds
+# settings that never change between runs (format selection, retry/backoff
+# tuning, etc) -- see the comment block at the top of that file for the
+# full explanation. CLI arguments take precedence over the same setting in
+# a --config-location file, so there's no conflict even though none of
+# these four are present in yt-dlp.conf itself anymore.
+$execCmd = "after_move:pwsh -NoProfile -File `"$scriptsRoot/postprocess.ps1`" -FilePath %(filepath)q"
+
+& yt-dlp `
+    --ignore-config `
+    --config-location $confFile `
+    --download-archive $archiveFile `
+    --paths "home:$completeArchiveDir" `
+    --paths "temp:$incompleteDir" `
+    --exec $execCmd `
+    $Url 2>&1 | Tee-Object -FilePath $logFile -Append
 
 "==== Download session finished $(Get-Date -Format o) ====" | Tee-Object -FilePath $logFile -Append
