@@ -34,3 +34,5 @@ ytdl [Youtube URL] [Destination Path]
 The `[Destination Path]` is optional, and if you don't use it, the videos will get saved to the default location (`/home/[username]/yt-dlp`). 
 
 Before you execute any of these commands though, just go over all of the scripts and configs yourself to ensure that they are safe to run. 
+
+Disclaimer: the majority of this code was generated with Claude Sonnet 5, with a small, initial amount of help by ChatGPT. 
