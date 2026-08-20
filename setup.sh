@@ -47,11 +47,30 @@ fi
 log "Step 3/10: Installing yt-dlp"
 if command -v yt-dlp >/dev/null 2>&1; then
     echo "yt-dlp already present ($(yt-dlp --version)) -- skipping install, run 'yt-dlp -U' to update."
+    # Fix ownership even on an already-installed binary -- this is exactly
+    # the bug that caused "Unable to write to /usr/local/bin/yt-dlp; try
+    # running as administrator" during a real run: the binary was installed
+    # via sudo (root-owned) but run_ytdlp.ps1 correctly runs yt-dlp -U as
+    # the regular user, never sudo, so self-update couldn't write over it.
+    YT_DLP_PATH="$(command -v yt-dlp)"
+    if [ -w "$YT_DLP_PATH" ]; then
+        : # already writable by this user, nothing to fix
+    else
+        sudo chown "$(id -u):$(id -g)" "$YT_DLP_PATH" 2>/dev/null \
+            && echo "Fixed ownership of $YT_DLP_PATH so 'yt-dlp -U' can self-update without sudo." \
+            || warn "$YT_DLP_PATH isn't writable by you and chown failed. Self-updates will keep failing with 'Unable to write' until you run: sudo chown \$(whoami):\$(whoami) $YT_DLP_PATH"
+    fi
 else
     if sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp; then
         sudo chmod a+rx /usr/local/bin/yt-dlp
+        # Owned by the actual user (not root) specifically so the
+        # dependency-check step in run_ytdlp.ps1 -- which deliberately runs
+        # as a normal user, never sudo, per this project's own stance on not
+        # having an unattended script silently invoke sudo -- can actually
+        # complete "yt-dlp -U" self-updates going forward.
+        sudo chown "$(id -u):$(id -g)" /usr/local/bin/yt-dlp
     else
-        warn "yt-dlp download failed. Retry manually: sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && sudo chmod a+rx /usr/local/bin/yt-dlp"
+        warn "yt-dlp download failed. Retry manually: sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && sudo chmod a+rx /usr/local/bin/yt-dlp && sudo chown \$(whoami):\$(whoami) /usr/local/bin/yt-dlp"
     fi
 fi
 
