@@ -16,7 +16,7 @@ Transfer these files to the virtual machine however you want (copy and paste fro
 Run this command: 
 
 ```
-cd [Path to Your Folder] && chmod +x setup.sh && ./setup.sh
+cd '[Path to Your Folder]' && chmod +x setup.sh && ./setup.sh
 ```
 
 Once that is installed, ensure that in your `/home/[username]/yt-dlp/configs` folder, there is a file called `yt-dlp.conf`. 
