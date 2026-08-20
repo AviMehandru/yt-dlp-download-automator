@@ -40,6 +40,13 @@ credit for all of it belongs to these projects.
 | **[open-vm-tools](https://github.com/vmware/open-vm-tools)** (incl. `vmhgfs-fuse`) | Host↔guest shared folder mount (`/mnt/hgfs`). | GPL v2 / LGPL v2.1 (mixed, per-component) |
 | **VMware Workstation Pro** | Host-side hypervisor the shared-folder setup is built around. | Proprietary (Broadcom/VMware) |
 
+## AI assistance
+
+| Contributor | What it helped with | 
+|---|---|
+| **[Claude](https://claude.com)** (Anthropic) | Architecture, scripting, debugging, and documentation for this pipeline across its Windows and Linux versions — including the orchestration scripts, `yt-dlp.conf` tuning, the setup automation, and this file. |
+| **ChatGPT** (OpenAI) | Assisted with earlier scripting and problem-solving on this project. |
+
 ---
 
 *If you're publishing this project, it's worth double-checking current
