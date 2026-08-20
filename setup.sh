@@ -6,15 +6,10 @@
 # plausibly fail on some systems (a package temporarily unavailable, no
 # GUI packages on a minimal server install, a flaky network blip) is
 # wrapped so a failure prints a clear WARNING and the script keeps going,
-# rather than dying silently partway through. This matters most for
-# Steps 8/9 (folder structure + placing the pipeline files, including
-# ytdl itself) -- those should basically ALWAYS run, since nothing about
-# them depends on earlier steps having succeeded. A previous version of
-# this script used "set -euo pipefail" with one unguarded "apt install"
-# for VMware guest tools; if that one command failed, the whole script
-# died right there and the folder/file-placement steps never ran at all.
-# That's fixed now: every step is independent, and a summary of anything
-# that needs manual attention prints at the very end.
+# rather than dying silently partway through. This matters most for the
+# folder-structure and file-placement steps -- those should basically
+# ALWAYS run, since nothing about them depends on earlier steps having
+# succeeded.
 #
 # Safe to re-run -- every step checks before it acts.
 #
@@ -22,60 +17,53 @@
 #   chmod +x setup.sh
 #   ./setup.sh
 
-TARGET_USER="$(whoami)"
 DATA_ROOT="${HOME}/yt-dlp"
+LOCAL_BIN="${HOME}/.local/bin"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_URL="https://github.com/AviMehandru/yt-dlp-download-automator.git"
+REPO_DIR="${SCRIPT_DIR}/YT-DLP Installation Files"
 WARNINGS=()
 
 log()  { echo -e "\n>>> $*"; }
 warn() { echo "WARNING: $*"; WARNINGS+=("$*"); }
 
+mkdir -p "$LOCAL_BIN"
+
 # --- Step 1: update the system ---
-log "Step 1/10: Updating system packages"
+log "Step 1/11: Updating system packages"
 if ! sudo apt update; then
     warn "apt update failed -- package installs below may use a stale index. Run 'sudo apt update' manually and re-run this script."
 fi
 sudo apt upgrade -y || warn "apt upgrade failed -- continuing anyway."
 
 # --- Step 2: base dependencies ---
-log "Step 2/10: Installing ffmpeg and base tools"
-if ! sudo apt install -y curl wget ffmpeg ca-certificates apt-transport-https software-properties-common python3-pip; then
-    warn "Base package install failed. yt-dlp/ffmpeg may not work until you run: sudo apt install -y curl wget ffmpeg ca-certificates apt-transport-https software-properties-common python3-pip"
+log "Step 2/11: Installing ffmpeg, git, and base tools"
+if ! sudo apt install -y curl wget git ffmpeg ca-certificates apt-transport-https software-properties-common python3-pip; then
+    warn "Base package install failed. yt-dlp/ffmpeg/git may not work until you run: sudo apt install -y curl wget git ffmpeg ca-certificates apt-transport-https software-properties-common python3-pip"
 fi
 
 # --- Step 3: yt-dlp (standalone binary, so -U self-update actually works) ---
-log "Step 3/10: Installing yt-dlp"
-if command -v yt-dlp >/dev/null 2>&1; then
-    echo "yt-dlp already present ($(yt-dlp --version)) -- skipping install, run 'yt-dlp -U' to update."
-    # Fix ownership even on an already-installed binary -- this is exactly
-    # the bug that caused "Unable to write to /usr/local/bin/yt-dlp; try
-    # running as administrator" during a real run: the binary was installed
-    # via sudo (root-owned) but run_ytdlp.ps1 correctly runs yt-dlp -U as
-    # the regular user, never sudo, so self-update couldn't write over it.
-    YT_DLP_PATH="$(command -v yt-dlp)"
-    if [ -w "$YT_DLP_PATH" ]; then
-        : # already writable by this user, nothing to fix
-    else
-        sudo chown "$(id -u):$(id -g)" "$YT_DLP_PATH" 2>/dev/null \
-            && echo "Fixed ownership of $YT_DLP_PATH so 'yt-dlp -U' can self-update without sudo." \
-            || warn "$YT_DLP_PATH isn't writable by you and chown failed. Self-updates will keep failing with 'Unable to write' until you run: sudo chown \$(whoami):\$(whoami) $YT_DLP_PATH"
-    fi
+# Installed to $HOME/.local/bin, NOT /usr/local/bin. A real run showed
+# self-update failing even after chown'ing just the binary file -- yt-dlp's
+# updater needs to write into the CONTAINING directory too (it writes a
+# temp file and renames over the old one), and /usr/local/bin is root-owned
+# regardless of who owns the file inside it. Installing into a directory
+# the user already owns outright sidesteps the whole problem rather than
+# patching around it.
+log "Step 3/11: Installing yt-dlp"
+if command -v yt-dlp >/dev/null 2>&1 && [ "$(command -v yt-dlp)" = "${LOCAL_BIN}/yt-dlp" ]; then
+    echo "yt-dlp already present at ${LOCAL_BIN}/yt-dlp ($(yt-dlp --version)) -- skipping install, run 'yt-dlp -U' to update."
 else
-    if sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp; then
-        sudo chmod a+rx /usr/local/bin/yt-dlp
-        # Owned by the actual user (not root) specifically so the
-        # dependency-check step in run_ytdlp.ps1 -- which deliberately runs
-        # as a normal user, never sudo, per this project's own stance on not
-        # having an unattended script silently invoke sudo -- can actually
-        # complete "yt-dlp -U" self-updates going forward.
-        sudo chown "$(id -u):$(id -g)" /usr/local/bin/yt-dlp
+    if curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o "${LOCAL_BIN}/yt-dlp"; then
+        chmod a+rx "${LOCAL_BIN}/yt-dlp"
+        echo "Installed yt-dlp to ${LOCAL_BIN}/yt-dlp."
     else
-        warn "yt-dlp download failed. Retry manually: sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && sudo chmod a+rx /usr/local/bin/yt-dlp && sudo chown \$(whoami):\$(whoami) /usr/local/bin/yt-dlp"
+        warn "yt-dlp download failed. Retry manually: curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ${LOCAL_BIN}/yt-dlp && chmod a+rx ${LOCAL_BIN}/yt-dlp"
     fi
 fi
 
 # --- Step 4: PowerShell 7 ---
-log "Step 4/10: Installing PowerShell 7 (pwsh)"
+log "Step 4/11: Installing PowerShell 7 (pwsh)"
 if command -v pwsh >/dev/null 2>&1; then
     echo "pwsh already present ($(pwsh --version)) -- skipping."
 else
@@ -101,45 +89,68 @@ else
 fi
 
 # --- Step 5: curl_cffi (fixes the "no impersonate target" warning) ---
-log "Step 5/10: Installing curl_cffi (browser-impersonation support for yt-dlp)"
+log "Step 5/11: Installing curl_cffi (browser-impersonation support for yt-dlp)"
 if ! python3 -m pip install -U "curl_cffi>=0.10" --break-system-packages; then
     warn "curl_cffi install failed. yt-dlp will keep warning about missing impersonation targets until you retry: python3 -m pip install -U \"curl_cffi>=0.10\" --break-system-packages"
 fi
 
 # --- Step 6: Deno (JS runtime -- YouTube now requires solving a JS ---
-# challenge for cipher decryption; without a JS runtime, yt-dlp falls back
-# to less reliable extraction paths, which is also a common cause of
-# mid-download HTTP 403 errors, not just the warning text itself.
-log "Step 6/10: Installing Deno (JavaScript runtime required for current YouTube extraction)"
-if command -v deno >/dev/null 2>&1; then
-    echo "deno already present ($(deno --version | head -n1)) -- skipping."
+# challenge for cipher decryption). Installed to $HOME/.local/bin for the
+# same reason as yt-dlp above -- no root-owned install location, no
+# possible ownership/permission mismatch down the line.
+log "Step 6/11: Installing Deno (JavaScript runtime required for current YouTube extraction)"
+if [ -x "${LOCAL_BIN}/deno" ]; then
+    echo "deno already present at ${LOCAL_BIN}/deno ($(${LOCAL_BIN}/deno --version | head -n1)) -- skipping."
 else
     if curl -fsSL https://deno.land/install.sh | sh -s -- -y >/tmp/deno-install.log 2>&1; then
         DENO_BIN="$(find "${HOME}/.deno/bin" -name deno 2>/dev/null | head -n1)"
         if [ -n "$DENO_BIN" ]; then
-            sudo cp "$DENO_BIN" /usr/local/bin/deno
-            sudo chmod a+rx /usr/local/bin/deno
-            echo "Installed deno to /usr/local/bin/deno ($(deno --version | head -n1))."
+            cp "$DENO_BIN" "${LOCAL_BIN}/deno"
+            chmod a+rx "${LOCAL_BIN}/deno"
+            echo "Installed deno to ${LOCAL_BIN}/deno ($(${LOCAL_BIN}/deno --version | head -n1))."
         else
             warn "Deno installer ran but the binary wasn't found under ${HOME}/.deno/bin -- see /tmp/deno-install.log."
         fi
     else
-        warn "Deno install failed -- see /tmp/deno-install.log. YouTube downloads may hit 403 errors or miss formats until this is resolved (yt-dlp/yt-dlp#14404). Retry manually: curl -fsSL https://deno.land/install.sh | sh"
+        warn "Deno install failed -- see /tmp/deno-install.log. YouTube downloads may hit errors or miss formats until this is resolved. Retry manually: curl -fsSL https://deno.land/install.sh | sh"
+    fi
+fi
+# run_ytdlp.ps1 expects deno at exactly $HOME/.local/bin/deno (it builds
+# this path itself via --js-runtimes, not read from PATH) -- if you ever
+# install deno somewhere else, that line needs updating too.
+
+# --- Step 7: clone the project repo ---
+# Convenience step: pulls the actual project files down automatically so
+# Step 10 below can find them without you having to place them by hand.
+# ASSUMPTION: this expects the repo to contain files named the same way
+# they've been named throughout this project (linux-run_ytdlp.ps1,
+# linux-postprocess.ps1, linux-yt-dlp.conf, linux-ytdl) either at the repo
+# root or in a "linux" subfolder -- Step 10 checks both. If your repo's
+# actual layout differs, this clone still succeeds (it's just a git
+# clone), but Step 10's automatic file-matching may not find them --
+# check the warnings at the end if so.
+log "Step 7/11: Cloning project repository"
+if [ -d "$REPO_DIR/.git" ]; then
+    echo "Repository already cloned at '${REPO_DIR}' -- pulling latest instead."
+    if ! git -C "$REPO_DIR" pull; then
+        warn "git pull failed in '${REPO_DIR}'. Check it manually if you expect updates from the repo."
+    fi
+else
+    if ! git clone "$REPO_URL" "$REPO_DIR"; then
+        warn "git clone of $REPO_URL failed. If the repo is private, you'll need to authenticate (e.g. gh auth login, or an SSH remote) and clone manually into: $REPO_DIR"
     fi
 fi
 
-# --- Step 7: VMware shared folder support (safe no-op outside VMware) ---
+# --- Step 8: VMware shared folder support (safe no-op outside VMware) ---
 # Deliberately does NOT reboot. A reboot would kill this script mid-run
 # (a shell script isn't a service -- it doesn't resume itself afterward),
 # and it isn't actually necessary: restarting the vmtoolsd service and
 # mounting directly gets the shared folder working immediately.
-log "Step 7/10: Setting up VMware shared folder (open-vm-tools)"
+log "Step 8/11: Setting up VMware shared folder (open-vm-tools)"
 if systemd-detect-virt 2>/dev/null | grep -qi vmware; then
     if ! sudo apt install -y open-vm-tools open-vm-tools-desktop; then
         warn "open-vm-tools install failed (open-vm-tools-desktop in particular can fail on a minimal/headless install if its GUI dependencies don't resolve). Shared folder won't be available. Retry with: sudo apt install -y open-vm-tools (drop -desktop if you're headless)."
     else
-        # Restart the service so the newly-installed tools take effect
-        # immediately, without a reboot.
         sudo systemctl restart open-vm-tools.service 2>/dev/null \
             || sudo systemctl restart vmtoolsd.service 2>/dev/null \
             || warn "Could not restart the VMware tools service by either known name -- shared folder may need a manual 'sudo reboot' if the direct mount below also fails."
@@ -159,8 +170,8 @@ else
     echo "Not detected as a VMware guest -- skipping shared folder setup."
 fi
 
-# --- Step 8: folder structure ---
-log "Step 8/10: Creating folder structure under ${DATA_ROOT}"
+# --- Step 9: folder structure ---
+log "Step 9/11: Creating folder structure under ${DATA_ROOT}"
 mkdir -p "${DATA_ROOT}/scripts"
 mkdir -p "${DATA_ROOT}/configs"
 mkdir -p "${DATA_ROOT}/Archive Logs/Archive History"
@@ -169,43 +180,51 @@ mkdir -p "${DATA_ROOT}/Youtube Videos/Complete Archive"
 mkdir -p "${DATA_ROOT}/Youtube Videos/_incomplete"
 mkdir -p "${DATA_ROOT}/Youtube Videos/Pure Video"
 mkdir -p "${DATA_ROOT}/Youtube Videos/Final Video"
-mkdir -p "${HOME}/.local/bin"
 echo "Folder structure created."
 
-# --- Step 9: place the four pipeline files ---
-# Each file is copied independently -- a missing one only warns about
-# itself and doesn't block the others, unlike a previous version of this
-# script which checked all four up front and skipped the ENTIRE step
-# (including ytdl) if even one was absent.
-log "Step 9/10: Installing pipeline files"
+# --- Step 10: place the four pipeline files ---
+# Looks in three places, in order: next to setup.sh itself, inside the
+# cloned repo's root, and inside a "linux" subfolder of the cloned repo
+# (covering the most likely layouts without guessing further). Each file
+# is resolved and copied independently -- a missing one only warns about
+# itself and doesn't block the others.
+log "Step 10/11: Installing pipeline files"
 copy_file() {
     local src="$1" dest="$2" label="$3"
-    if [ -f "${SCRIPT_DIR}/${src}" ]; then
-        cp "${SCRIPT_DIR}/${src}" "$dest"
-        echo "Installed ${label} -> ${dest}"
-    else
-        warn "${src} not found next to setup.sh (looked in ${SCRIPT_DIR}) -- ${label} was NOT installed. Copy it to ${dest} manually."
-    fi
+    local candidates=(
+        "${SCRIPT_DIR}/${src}"
+        "${REPO_DIR}/${src}"
+        "${REPO_DIR}/linux/${src}"
+    )
+    for candidate in "${candidates[@]}"; do
+        if [ -f "$candidate" ]; then
+            cp "$candidate" "$dest"
+            echo "Installed ${label} -> ${dest} (from ${candidate})"
+            return 0
+        fi
+    done
+    warn "${src} not found in any of: ${candidates[*]} -- ${label} was NOT installed. Copy it to ${dest} manually."
 }
 copy_file "linux-run_ytdlp.ps1"   "${DATA_ROOT}/scripts/run_ytdlp.ps1"   "run_ytdlp.ps1"
 copy_file "linux-postprocess.ps1" "${DATA_ROOT}/scripts/postprocess.ps1" "postprocess.ps1"
 copy_file "linux-yt-dlp.conf"     "${DATA_ROOT}/configs/yt-dlp.conf"     "yt-dlp.conf"
-copy_file "linux-ytdl"            "${HOME}/.local/bin/ytdl"              "ytdl"
-if [ -f "${HOME}/.local/bin/ytdl" ]; then
-    chmod +x "${HOME}/.local/bin/ytdl"
+copy_file "linux-ytdl"            "${LOCAL_BIN}/ytdl"                    "ytdl"
+if [ -f "${LOCAL_BIN}/ytdl" ]; then
+    chmod +x "${LOCAL_BIN}/ytdl"
 fi
 
-if ! echo "$PATH" | tr ':' '\n' | grep -q "${HOME}/.local/bin"; then
-    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "${HOME}/.bashrc"
-    echo "Added \$HOME/.local/bin to PATH in ~/.bashrc -- run 'source ~/.bashrc' or start a new shell before using 'ytdl'."
+if ! echo "$PATH" | tr ':' '\n' | grep -q "${LOCAL_BIN}"; then
+    echo "export PATH=\"${LOCAL_BIN}:\$PATH\"" >> "${HOME}/.bashrc"
+    echo "Added ${LOCAL_BIN} to PATH in ~/.bashrc -- run 'source ~/.bashrc' or start a new shell before using 'ytdl'."
 fi
 
-# --- Step 10: verify ---
-log "Step 10/10: Verifying installation"
+# --- Step 11: verify ---
+log "Step 11/11: Verifying installation"
 echo "yt-dlp:  $(yt-dlp --version 2>/dev/null || echo 'NOT FOUND')"
 echo "ffmpeg:  $(ffmpeg -version 2>/dev/null | head -n1 || echo 'NOT FOUND')"
 echo "pwsh:    $(pwsh --version 2>/dev/null || echo 'NOT FOUND')"
-echo "deno:    $(deno --version 2>/dev/null | head -n1 || echo 'NOT FOUND')"
+echo "deno:    $(${LOCAL_BIN}/deno --version 2>/dev/null | head -n1 || echo 'NOT FOUND')"
+echo "git:     $(git --version 2>/dev/null || echo 'NOT FOUND')"
 echo "ytdl:    $(command -v ytdl || echo 'NOT FOUND (open a new shell if PATH was just updated)')"
 
 if [ "${#WARNINGS[@]}" -gt 0 ]; then

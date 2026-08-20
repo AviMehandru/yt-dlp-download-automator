@@ -103,9 +103,27 @@ $timestamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
 $updateThrottleMarker = Join-Path $installRoot ".last_dependency_check"
 $updateThrottleHours = 24
 $needsDependencyCheck = $true
-if (Test-Path $updateThrottleMarker) {
-    $age = (Get-Date) - (Get-Item $updateThrottleMarker).LastWriteTime
-    if ($age.TotalHours -lt $updateThrottleHours) { $needsDependencyCheck = $false }
+# Wrapped in try/catch rather than a bare Test-Path/Get-Item pair: a real
+# run hit a case where Test-Path reported the marker existed but Get-Item
+# immediately after could not find it (root cause unconfirmed -- possibly
+# a filesystem-level inconsistency from an earlier forced VM reboot; see
+# the setup guide's note on "sudo reboot -f" -- but the fix doesn't depend
+# on knowing why). Get-Item failing used to throw a non-terminating error
+# that then cascaded into a SECOND error (subtracting from $null), and
+# crucially, neither error was wrapped in Tee-Object -- they're both above
+# where $logFile even starts being written to -- so they went straight to
+# the terminal and never appeared in download.log at all. Any failure
+# here now just falls back to the safe default (treat it as needing a
+# fresh check) instead of crashing partway through, and gets logged
+# properly instead of vanishing.
+try {
+    if (Test-Path $updateThrottleMarker) {
+        $markerItem = Get-Item $updateThrottleMarker -ErrorAction Stop
+        $age = (Get-Date) - $markerItem.LastWriteTime
+        if ($age.TotalHours -lt $updateThrottleHours) { $needsDependencyCheck = $false }
+    }
+} catch {
+    "  [dependency check] Could not read the throttle marker ($updateThrottleMarker) -- running the check anyway. Error: $($_.Exception.Message)" | Tee-Object -FilePath $logFile -Append
 }
 
 if ($needsDependencyCheck) {
@@ -165,12 +183,20 @@ if ($DataRoot) { "Data root override: $dataRoot" | Tee-Object -FilePath $logFile
 # these four are present in yt-dlp.conf itself anymore.
 $execCmd = "after_move:pwsh -NoProfile -File `"$scriptsRoot/postprocess.ps1`" -FilePath %(filepath)q"
 
+# --js-runtimes also lives here rather than in yt-dlp.conf, for the same
+# reason as the four above: it needs a real, resolved $HOME-based path
+# (deno lives at $HOME/.local/bin/deno -- see setup.sh), and yt-dlp.conf
+# is deliberately static, username-independent text with no per-user
+# paths in it at all.
+$denoPath = Join-Path $HOME ".local/bin/deno"
+
 & yt-dlp `
     --ignore-config `
     --config-location $confFile `
     --download-archive $archiveFile `
     --paths "home:$completeArchiveDir" `
     --paths "temp:$incompleteDir" `
+    --js-runtimes "deno:$denoPath" `
     --exec $execCmd `
     $Url 2>&1 | Tee-Object -FilePath $logFile -Append
 
