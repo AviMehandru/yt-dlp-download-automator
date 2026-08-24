@@ -13,7 +13,7 @@ Additionally, set up a shared folder between the two machines, using your hyperv
 After this, run this command: 
 
 ```
-curl -sSL https://raw.githubusercontent.com/AviMehandru/yt-dlp-download-automator/refs/heads/main/setup.sh -o setup.sh && chmod +x setup.sh && ./setup.sh && rm setup.sh
+sudo apt install curl && curl -sSL https://raw.githubusercontent.com/AviMehandru/yt-dlp-download-automator/refs/heads/main/setup.sh -o setup.sh && chmod +x setup.sh && ./setup.sh && rm setup.sh
 ```
 
 Once that is installed, ensure that in your `/home/[username]/yt-dlp/configs` folder, there is a file called `yt-dlp.conf`. 
