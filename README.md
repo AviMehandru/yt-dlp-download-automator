@@ -10,13 +10,10 @@ After that, download the latest version of Ubuntu. This has been tested up to ve
 Install Ubuntu on your virtual machine hypervisor. 
 Additionally, set up a shared folder between the two machines, using your hypervisor settings. 
 
-After this, copy over the all of the files in this repo (aside from the license and README.md), and put them in one folder. 
-Transfer these files to the virtual machine however you want (copy and paste from the host, external drive, download directly from the github, etc.). 
-
-Run this command: 
+After this, run this command: 
 
 ```
-cd '[Path to Your Folder]' && chmod +x setup.sh && ./setup.sh
+curl -sSL https://raw.githubusercontent.com/AviMehandru/yt-dlp-download-automator/refs/heads/main/setup.sh -o setup.sh && chmod +x setup.sh && ./setup.sh && rm setup.sh
 ```
 
 Once that is installed, ensure that in your `/home/[username]/yt-dlp/configs` folder, there is a file called `yt-dlp.conf`. 
@@ -35,4 +32,4 @@ The `[Destination Path]` is optional, and if you don't use it, the videos will g
 
 Before you execute any of these commands though, just go over all of the scripts and configs yourself to ensure that they are safe to run. 
 
-Disclaimer: the majority of this code was generated with Claude Sonnet 5, with a small, initial amount of help by ChatGPT. 
+Disclaimer: the majority of this code was generated with Claude Sonnet 5, with a small, initial amount of help by ChatGPT. More on this in the CREDITS.md file. 
