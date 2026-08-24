@@ -215,7 +215,8 @@ fi
 
 if ! echo "$PATH" | tr ':' '\n' | grep -q "${LOCAL_BIN}"; then
     echo "export PATH=\"${LOCAL_BIN}:\$PATH\"" >> "${HOME}/.bashrc"
-    echo "Added ${LOCAL_BIN} to PATH in ~/.bashrc -- run 'source ~/.bashrc' or start a new shell before using 'ytdl'."
+    export PATH="${LOCAL_BIN}:$PATH"
+    echo "Added ${LOCAL_BIN} to PATH in ~/.bashrc."
 fi
 
 # --- Step 11: verify ---
