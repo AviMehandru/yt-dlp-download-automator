@@ -128,8 +128,10 @@ try {
 
 if ($needsDependencyCheck) {
     "-- Dependency check (throttled to once/$updateThrottleHours`h) --" | Tee-Object -FilePath $logFile -Append
-    $updateOutput = & yt-dlp -U 2>&1
-    $updateOutput | ForEach-Object { "  [yt-dlp -U] $_" | Tee-Object -FilePath $logFile -Append }
+    # Same streaming-log fix as in postprocess.ps1: log each line as
+    # yt-dlp -U produces it (a self-update download included) rather than
+    # buffering the whole thing into a variable first.
+    & yt-dlp -U 2>&1 | ForEach-Object { "  [yt-dlp -U] $_" | Tee-Object -FilePath $logFile -Append }
 
     $aptUpgradable = $null
     try {
