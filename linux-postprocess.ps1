@@ -200,6 +200,17 @@ try {
             $commentsTempDir = Join-Path $videoMetaDir "_comments_temp"
             if (!(Test-Path $commentsTempDir)) { New-Item -ItemType Directory -Path $commentsTempDir -Force | Out-Null }
 
+            # Piped through ForEach-Object rather than captured into a
+            # variable first -- capturing the whole `& yt-dlp ... 2>&1`
+            # output into $commentsOutput BEFORE logging it meant
+            # PowerShell buffered the entire comments fetch silently in
+            # memory and only printed anything once the process fully
+            # exited. On a heavily-commented video that's exactly a 15+
+            # minute silent gap with zero console/log output, looking
+            # exactly like the script had hung, when it was actually
+            # working the whole time. Logging each line AS it streams
+            # (while still building $commentsOutput for the warning-count
+            # check below) fixes that with no change in end behavior.
             $commentsOutput = & yt-dlp `
                 --ignore-config `
                 --skip-download `
@@ -209,8 +220,10 @@ try {
                 --retry-sleep "extractor:exp=1:30:2" `
                 --sleep-requests 2 `
                 -o (Join-Path $commentsTempDir "comments.%(ext)s") `
-                $originalUrl 2>&1
-            $commentsOutput | ForEach-Object { Log "  [comments] $_" }
+                $originalUrl 2>&1 | ForEach-Object {
+                    Log "  [comments] $_"
+                    $_
+                }
 
             $commentIssues = $commentsOutput | Where-Object { $_ -match '(?i)(warn|error|unable|fail)' }
             if ($commentIssues) {
@@ -265,8 +278,15 @@ try {
             }
 
             $remuxTemp = Join-Path $finalFilesDir ("_remux_temp_{0}.mkv" -f ([guid]::NewGuid().ToString("N")))
-            $ffmpegOutput = & ffmpeg -y -i $FilePath -attach $infoJsonFile.FullName -metadata:s:t:$existingAttachCount "mimetype=application/json" -map 0 -c copy $remuxTemp 2>&1
-            $ffmpegOutput | ForEach-Object { Log "  [ffmpeg-reembed] $_" }
+            # Same streaming-log fix as the comments pass above, applied
+            # here too for consistency -- a stream-copy remux is normally
+            # fast, but on a very large file or a slow disk there's no
+            # reason to let output sit buffered instead of showing up as
+            # it happens.
+            $ffmpegOutput = & ffmpeg -y -i $FilePath -attach $infoJsonFile.FullName -metadata:s:t:$existingAttachCount "mimetype=application/json" -map 0 -c copy $remuxTemp 2>&1 | ForEach-Object {
+                Log "  [ffmpeg-reembed] $_"
+                $_
+            }
 
             if ((Test-Path $remuxTemp) -and (Get-Item $remuxTemp).Length -gt 0) {
                 Remove-Item -Path $FilePath -Force
