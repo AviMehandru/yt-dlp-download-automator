@@ -5,7 +5,45 @@ param(
     # the pipeline install itself (scripts/, configs/) always stays at
     # $HOME/yt-dlp, since ytdl has to know where to find run_ytdlp.ps1 in
     # the first place, before any argument parsing can happen.
-    [Parameter(Mandatory = $false)][string]$DataRoot = ""
+    [Parameter(Mandatory = $false)][string]$DataRoot = "",
+
+    # --- Playlist/channel options ---
+    # Deliberately NOT a separate script or a URL-type detection step.
+    # yt-dlp's own extractor already knows whether a URL is a single video,
+    # a playlist, or a channel far more reliably than any regex this script
+    # could write, and every downstream step (the -o templates, the
+    # --exec after_move hook, --download-archive, postprocess.ps1's
+    # channel-info throttle) already operates per-video regardless of how
+    # many videos are in the session. So a single video URL and a whole
+    # channel URL take the exact same code path below -- these four
+    # switches just add options that only matter once a session has more
+    # than one video in it, and are no-ops (or harmless) on a single video.
+
+    # Stops the run as soon as it hits a video ID already present in
+    # --download-archive. Meant for periodic "channel sync" runs: re-running
+    # against a channel/playlist you've mostly already archived otherwise
+    # walks its ENTIRE upload history every time just to discover nothing's
+    # new. Only safe to rely on for newest-first sources (a channel's
+    # default /videos listing) -- if you've reordered or filtered the
+    # source, --break-on-existing can stop before reaching genuinely new
+    # videos further down the list.
+    [Parameter(Mandatory = $false)][switch]$BreakOnExisting,
+
+    # Passed straight through to yt-dlp's own --playlist-items, e.g.
+    # "1-20" or "5,8,10-15". Only meaningful against a playlist/channel URL.
+    [Parameter(Mandatory = $false)][string]$PlaylistItems = "",
+
+    # Passed straight through to yt-dlp's own --dateafter, e.g. "20250101".
+    # Useful for picking up a channel mid-history without re-walking
+    # everything before a known point.
+    [Parameter(Mandatory = $false)][string]$DateAfter = "",
+
+    # Maps to yt-dlp's own --lazy-playlist: starts downloading as videos are
+    # discovered instead of enumerating the entire playlist/channel listing
+    # first. Matters on very large channels (hundreds+ of videos), where
+    # eager enumeration is a long delay before the first byte of video ever
+    # downloads. Harmless on a single video.
+    [Parameter(Mandatory = $false)][switch]$LazyPlaylist
 )
 
 # On PowerShell 7.3+, native-command stderr lines get wrapped as ErrorRecord
@@ -168,6 +206,14 @@ $ffmpegVersion = if ($ffmpegRaw) { ($ffmpegRaw -split "`n")[0] } else { $null }
 "yt-dlp: $ytDlpVersion | ffmpeg: $ffmpegVersion | config version: $configVersion" | Tee-Object -FilePath $logFile -Append
 "URL: $Url" | Tee-Object -FilePath $logFile -Append
 if ($DataRoot) { "Data root override: $dataRoot" | Tee-Object -FilePath $logFile -Append }
+if ($BreakOnExisting -or $PlaylistItems -or $DateAfter -or $LazyPlaylist) {
+    $optionNotes = @()
+    if ($BreakOnExisting) { $optionNotes += "break-on-existing" }
+    if ($PlaylistItems)   { $optionNotes += "playlist-items=$PlaylistItems" }
+    if ($DateAfter)       { $optionNotes += "dateafter=$DateAfter" }
+    if ($LazyPlaylist)    { $optionNotes += "lazy-playlist" }
+    "Playlist/channel options: $($optionNotes -join ', ')" | Tee-Object -FilePath $logFile -Append
+}
 
 # --- Run yt-dlp, capturing stdout AND stderr (warnings/errors) into the log ---
 # --ignore-config stops yt-dlp from also auto-loading any yt-dlp.conf it finds
@@ -192,6 +238,29 @@ $execCmd = "after_move:pwsh -NoProfile -File `"$scriptsRoot/postprocess.ps1`" -F
 # paths in it at all.
 $denoPath = Join-Path $HOME ".local/bin/deno"
 
+# --- Playlist/channel CLI args (only added when actually requested) ---
+# Built as an array, not string-interpolated into $execCmd-style text, so
+# an empty/unused option never contributes a stray blank argument to the
+# yt-dlp call below -- @() splats to nothing when none of the switches or
+# strings were supplied, making a single-video run byte-for-byte the same
+# invocation as before these params existed.
+$playlistArgs = @()
+if ($BreakOnExisting) { $playlistArgs += "--break-on-existing" }
+if ($PlaylistItems)   { $playlistArgs += @("--playlist-items", $PlaylistItems) }
+if ($DateAfter)       { $playlistArgs += @("--dateafter", $DateAfter) }
+if ($LazyPlaylist)    { $playlistArgs += "--lazy-playlist" }
+
+# Captured into $sessionOutput via a chained Tee-Object -Variable, rather
+# than `$sessionOutput = ... | Tee-Object -FilePath $logFile`. Assigning a
+# pipeline straight to a variable captures ALL of its output into that
+# variable instead of also letting it reach the console -- which would
+# silently kill live progress output for the whole session (exactly the
+# "looks hung, isn't" trap postprocess.ps1's comments pass already hit and
+# fixed once; same principle applies here, just for the main download
+# instead of the comments sub-pass). Chaining a second Tee-Object -FilePath
+# after the -Variable one keeps both: the file gets written to, the
+# console still streams live, and $sessionOutput is populated for the
+# summary below.
 & yt-dlp `
     --ignore-config `
     --config-location $confFile `
@@ -200,6 +269,19 @@ $denoPath = Join-Path $HOME ".local/bin/deno"
     --paths "temp:$incompleteDir" `
     --js-runtimes "deno:$denoPath" `
     --exec $execCmd `
-    $Url 2>&1 | Tee-Object -FilePath $logFile -Append
+    @playlistArgs `
+    $Url 2>&1 | Tee-Object -Variable sessionOutput | Tee-Object -FilePath $logFile -Append
+
+# --- Session summary ---
+# Best-effort, parsed from yt-dlp's own console text rather than any
+# official yt-dlp API for this -- there isn't one. Most useful for
+# playlist/channel sessions (where "how many of the 80 videos in this
+# channel were actually new" isn't obvious from scrolling the log); for a
+# single video it'll just read "1 video touched, 0 already archived".
+$videosTouched   = @($sessionOutput | Select-String -Pattern '^\[youtube\] [\w-]{6,}: Downloading').Count
+$archiveSkipped  = @($sessionOutput | Select-String -Pattern 'has already been recorded in the archive').Count
+$sessionErrors   = @($sessionOutput | Select-String -Pattern '^ERROR:').Count
+$sessionWarnings = @($sessionOutput | Select-String -Pattern '^WARNING:').Count
+"-- Session summary: $videosTouched video(s) touched, $archiveSkipped already archived (skipped), $sessionErrors error(s), $sessionWarnings warning(s) --" | Tee-Object -FilePath $logFile -Append
 
 "==== Download session finished $(Get-Date -Format o) ====" | Tee-Object -FilePath $logFile -Append
