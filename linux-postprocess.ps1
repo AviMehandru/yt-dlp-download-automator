@@ -16,7 +16,6 @@ try {
     $videoMetaDir  = Join-Path $videoDir "Video metadata"
     $logsDir       = Join-Path $videoDir "Logs"
     $urlsDir       = Join-Path $videoDir "URLs"
-    $pureVideoDir  = Join-Path (Join-Path $youtubeRoot "Pure Video") $uploader
 
     # $dataRoot is the parent of "Youtube Videos" -- derived from $FilePath
     # itself (via $youtubeRoot above), so this correctly reflects whichever
@@ -29,7 +28,7 @@ try {
     $dataRoot    = Split-Path $youtubeRoot -Parent
     $installRoot = Join-Path $HOME "yt-dlp"
 
-    foreach ($d in @($logsDir, $urlsDir, $pureVideoDir)) {
+    foreach ($d in @($logsDir, $urlsDir)) {
         if (!(Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
     }
 
@@ -41,6 +40,55 @@ try {
     }
 
     Log "Post-processing started for: $FilePath"
+
+    # --- Only run the full pipeline for the actual final merged file ---
+    # yt-dlp's --exec "after_move:..." hook fires once for EVERY file that
+    # gets moved into its final location, not just the merged video. With
+    # --keep-video set (as it is here), that includes the separate,
+    # pre-merge video-only and audio-only streams too -- each one gets its
+    # own invocation of this entire script. Nothing below this point was
+    # ever gated by file type except the info.json re-embed step further
+    # down, so a run triggered by one of those intermediate streams would
+    # still redo the (expensive, 30-60+ min) comments fetch, overwrite
+    # manifest.json/checksums.sha256 with that stream's info instead of
+    # the real video's, and -- most visibly -- copy that stream into the
+    # Final Video repository, silently replacing the actual merged .mkv
+    # there with a video-only or audio-only fragment, depending on which
+    # invocation happened to finish last. That's almost certainly why
+    # files elsewhere named after the "final" video haven't looked like
+    # the real thing: whichever invocation ran last won. Only the final
+    # merged .mkv should ever reach any of this, so every other file this
+    # script gets invoked with is now skipped outright.
+    if ($FilePath -notmatch '\.mkv$') {
+        Log "Skipped: not the final merged .mkv (this is a --keep-video pre-merge stream, e.g. the video-only or audio-only file). No further processing done for this invocation."
+        return
+    }
+
+    # --- Relocate --keep-video's pre-merge streams for clarity ---
+    # --keep-video keeps the original, un-merged video-only and audio-only
+    # streams alongside the final merged file, using the same "Final Video"
+    # base name with yt-dlp's own format-id suffix inserted before the
+    # extension (e.g. "Final Video.f137.mp4", "Final Video.f251.m4a").
+    # Several near-identically-named files sitting in the same folder is
+    # exactly what caused the "which one of these is actually final?"
+    # confusion -- moving the pre-merge ones out into their own subfolder
+    # leaves only the real final file ("Final Video.mkv") at the top level
+    # of "Final files", with the raw streams still kept nearby, just no
+    # longer easy to mistake for it.
+    try {
+        $preMergeFiles = Get-ChildItem -Path $finalFilesDir -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -ne $FilePath -and $_.Name -match '^Final Video\.f\S+\.' }
+        if ($preMergeFiles) {
+            $preMergeDir = Join-Path $finalFilesDir "Pre-merge streams"
+            if (!(Test-Path $preMergeDir)) { New-Item -ItemType Directory -Path $preMergeDir -Force | Out-Null }
+            foreach ($f in $preMergeFiles) {
+                Move-Item -Path $f.FullName -Destination (Join-Path $preMergeDir $f.Name) -Force
+            }
+            Log "Moved $($preMergeFiles.Count) --keep-video pre-merge stream(s) into 'Pre-merge streams/' -- Final Video.mkv is the only true final output remaining in Final files."
+        }
+    } catch {
+        Log "WARNING: Could not relocate --keep-video pre-merge streams: $($_.Exception.Message)"
+    }
 
     # --- Locate the matching info.json (retry briefly for FS/AV-scan lag) ---
     $infoJsonFile = $null
@@ -62,8 +110,9 @@ try {
         $playlistUrl  = if ($info.playlist_id) { "https://www.youtube.com/playlist?list=$($info.playlist_id)" } else { $null }
     } else {
         # Degrade gracefully rather than aborting: still do checksums, the
-        # manifest, and (importantly) the Pure Video copy below, just with
-        # blank URL/playlist fields. Recover what we can from the folder
+        # manifest, and (importantly) the Final Video repository sync
+        # below, just with blank URL/playlist fields. Recover what we can
+        # from the folder
         # name itself, which encodes uploader/date/id/title.
         Log "WARNING: No .info.json found in $videoMetaDir after retrying. Continuing with filename-derived metadata only."
         $info = $null
@@ -360,18 +409,6 @@ try {
     $manifest | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $videoMetaDir "manifest.json")
     Log "Wrote manifest.json."
 
-    # --- Copy final file to Pure Video (replaces old copy_to_pure.bat) ---
-    # $FilePath's own filename is now a short generic name (Final Video.mkv)
-    # since the folder already carries the full descriptive name -- Pure
-    # Video specifically wants the full name on the file itself, so this is
-    # built from the folder name (already yt-dlp-sanitized) rather than
-    # reusing $FilePath's leaf, and rather than reconstructing from the raw
-    # (unsanitized) info.json title field.
-    $pureVideoFileName = (Split-Path $videoDir -Leaf) + [System.IO.Path]::GetExtension($FilePath)
-    $destFile = Join-Path $pureVideoDir $pureVideoFileName
-    Copy-Item -Path $FilePath -Destination $destFile -Force
-    Log "Copied final file to Pure Video: $destFile"
-
     # --- Channel manifest (#15) ---
     $channelManifestPath = Join-Path $channelDir "channel_manifest.json"
     $channelManifest = if (Test-Path $channelManifestPath) {
@@ -446,11 +483,13 @@ try {
     # <uploader>/, parallel to Complete Archive -- meant as the one place
     # to point a media player or another machine at, without pulling in
     # the full per-video folder tree (subtitles/description/checksums/etc)
-    # that Complete Archive carries for every video. Distinct in purpose
-    # from Pure Video (which exists purely to hold the plain video file,
-    # nothing else): this also carries a synced copy of that channel's
-    # manifest and Channel Info assets, refreshed every run, plus a
-    # synced copy of the global manifest at the repository root.
+    # that Complete Archive carries for every video. This is now the ONLY
+    # "plain video" copy the pipeline maintains (the separate "Pure Video"
+    # repository was removed -- it duplicated this folder's purpose almost
+    # exactly, and having both was more confusing than useful). This also
+    # carries a synced copy of that channel's manifest and Channel Info
+    # assets, refreshed every run, plus a synced copy of the global
+    # manifest at the repository root.
     try {
         $finalVideoRoot        = Join-Path $youtubeRoot "Final Video"
         $finalVideoChannelDir  = Join-Path $finalVideoRoot $uploader
@@ -458,9 +497,11 @@ try {
             New-Item -ItemType Directory -Path $finalVideoChannelDir -Force | Out-Null
         }
 
-        # Same full-descriptive-name convention as Pure Video, and for the
-        # same reason: built from the already-sanitized folder name rather
-        # than reconstructed from raw (unsanitized) info.json fields.
+        # Full descriptive filename, built from the already-sanitized
+        # folder name rather than reconstructed from raw (unsanitized)
+        # info.json fields -- the folder name has already been through
+        # yt-dlp's own filename sanitization, so reusing it avoids
+        # re-doing (and potentially mismatching) that logic here.
         $finalVideoFileName = (Split-Path $videoDir -Leaf) + [System.IO.Path]::GetExtension($FilePath)
         Copy-Item -Path $FilePath -Destination (Join-Path $finalVideoChannelDir $finalVideoFileName) -Force
 

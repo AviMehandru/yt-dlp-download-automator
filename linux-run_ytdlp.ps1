@@ -103,7 +103,6 @@ foreach ($d in @(
     $historyDir,
     $completeArchiveDir,
     $incompleteDir,
-    (Join-Path $videosRoot "Pure Video"),
     (Join-Path $videosRoot "Final Video")
 )) {
     if (!(Test-Path $d)) {
