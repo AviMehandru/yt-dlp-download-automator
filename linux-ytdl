@@ -16,7 +16,20 @@
 #   --after YYYYMMDD      yt-dlp's own --dateafter, e.g. --after 20250101
 #   --lazy               Start downloading as videos are discovered
 #                        instead of enumerating the whole listing first.
-#                        Mainly useful on very large channels.
+#                        Mainly useful on very large channels. No effect
+#                        combined with --workers > 1 (see below).
+#   --workers N           Download N videos AT THE SAME TIME instead of
+#                        one after another. Default 1 (unchanged
+#                        behavior). See run_ytdlp.ps1's own comments on
+#                        -Workers for what this actually does and why it's
+#                        NOT the same as just running ytdl several times
+#                        yourself in different terminals -- short version:
+#                        this enumerates every video up front so no two
+#                        workers can ever be assigned the same one, and
+#                        postprocess.ps1 has matching file-locking so
+#                        concurrent workers don't corrupt shared manifests.
+#                        Start low (2-4) and watch download.log for
+#                        rate-limit warnings before going higher.
 #   --path PATH           Same as the legacy positional path below, as an
 #                        explicit flag -- use this if you also need one of
 #                        the options above in the same command.
@@ -41,7 +54,7 @@
 
 URL="$1"
 if [ -z "$URL" ]; then
-    echo "Usage: ytdl <youtube-url> [download-root-path] [--sync] [--items RANGE] [--after YYYYMMDD] [--lazy] [--path PATH]" >&2
+    echo "Usage: ytdl <youtube-url> [download-root-path] [--sync] [--items RANGE] [--after YYYYMMDD] [--lazy] [--workers N] [--path PATH]" >&2
     exit 1
 fi
 shift
@@ -51,6 +64,7 @@ BREAK_ON_EXISTING=0
 PLAYLIST_ITEMS=""
 DATE_AFTER=""
 LAZY_PLAYLIST=0
+WORKERS=""
 
 # Backward compatibility: if the first remaining argument doesn't start
 # with "--", treat it as the legacy positional custom download-root path
@@ -78,13 +92,21 @@ while [ $# -gt 0 ]; do
             LAZY_PLAYLIST=1
             shift
             ;;
+        --workers)
+            WORKERS="${2:-}"
+            if ! [[ "$WORKERS" =~ ^[0-9]+$ ]] || [ "$WORKERS" -lt 1 ]; then
+                echo "Error: --workers requires a positive integer (got: '$WORKERS')" >&2
+                exit 1
+            fi
+            shift 2
+            ;;
         --path)
             CUSTOM_PATH="${2:-}"
             shift 2
             ;;
         *)
             echo "Unknown option: $1" >&2
-            echo "Usage: ytdl <youtube-url> [download-root-path] [--sync] [--items RANGE] [--after YYYYMMDD] [--lazy] [--path PATH]" >&2
+            echo "Usage: ytdl <youtube-url> [download-root-path] [--sync] [--items RANGE] [--after YYYYMMDD] [--lazy] [--workers N] [--path PATH]" >&2
             exit 1
             ;;
     esac
@@ -96,5 +118,6 @@ PWSH_ARGS=(-Url "$URL")
 [ -n "$PLAYLIST_ITEMS" ] && PWSH_ARGS+=(-PlaylistItems "$PLAYLIST_ITEMS")
 [ -n "$DATE_AFTER" ] && PWSH_ARGS+=(-DateAfter "$DATE_AFTER")
 [ "$LAZY_PLAYLIST" -eq 1 ] && PWSH_ARGS+=(-LazyPlaylist)
+[ -n "$WORKERS" ] && PWSH_ARGS+=(-Workers "$WORKERS")
 
 pwsh -NoProfile -File "$HOME/yt-dlp/scripts/run_ytdlp.ps1" "${PWSH_ARGS[@]}"

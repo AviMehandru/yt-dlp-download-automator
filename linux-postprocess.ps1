@@ -1,8 +1,73 @@
 param(
-    [Parameter(Mandatory = $true)][string]$FilePath
+    [Parameter(Mandatory = $true)][string]$FilePath,
+
+    # Which file under Archive Logs/Logs/ this invocation's slice of yt-dlp
+    # console output should be read from, for the video_complete.log copy
+    # further down. Defaults to "download.log" -- the single shared log
+    # every non-parallel run has always used -- so a manual/standalone
+    # invocation of this script behaves exactly as before. When run_ytdlp.ps1
+    # is dispatching multiple videos in parallel (-Workers > 1), each
+    # worker downloads into its OWN log file instead of the shared one, and
+    # passes that file's name here. This matters because the video_complete.log
+    # logic below works by finding "the most recent session-start marker" in
+    # whichever log it reads -- against a single SHARED log with several
+    # downloads interleaved line-by-line from concurrent processes, that
+    # search is meaningless (there's no single "most recent session," and
+    # the lines from unrelated videos would end up interleaved into each
+    # other's video_complete.log). A distinct log per concurrent worker
+    # keeps that logic correct with no other changes needed.
+    [Parameter(Mandatory = $false)][string]$LogFileName = "download.log"
 )
 
 $ErrorActionPreference = "Stop"
+
+# --- Cross-platform advisory file locking ---
+# Needed once postprocess.ps1 can run for several videos AT THE SAME TIME
+# (under run_ytdlp.ps1 -Workers N): several instances of this script can
+# now be doing their own read-modify-write of the SAME shared files
+# (channel_manifest.json, global_manifest.json) or the same
+# check-then-act sequence (the Channel Info refresh throttle) at once.
+# Without serializing those specific sections, two concurrent instances
+# can each read the "before" state, both compute their own "after" state,
+# and whichever writes last silently wins -- the other's update is lost.
+# This isn't hypothetical: it's the exact shape of bug that would corrupt
+# a manifest without ever throwing an error or appearing in any log.
+#
+# Deliberately NOT using the Linux `flock` binary: that would work here,
+# but this pipeline's Windows variant has no equivalent, and shelling out
+# to flock -c "..." to wrap a block of PowerShell is awkward (it means
+# writing the block out to a temp script file just to invoke it under the
+# lock). Opening a file with FileShare.None instead is a plain .NET
+# primitive available identically on both platforms -- a second process
+# trying to open the same path the same way gets a normal IOException
+# until the first one closes it, which is all a mutex needs to do here.
+# This is advisory locking (it only blocks other code that also calls
+# Enter-Lock/Exit-Lock around the same path) -- fine for this use, since
+# every writer of these particular files is postprocess.ps1 itself.
+function Enter-Lock {
+    param(
+        [Parameter(Mandatory = $true)][string]$LockPath,
+        [int]$TimeoutSeconds = 300   # generous: this only ever guards fast, local file I/O, never a network call
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ($true) {
+        try {
+            return [System.IO.File]::Open($LockPath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        } catch [System.IO.IOException] {
+            if ((Get-Date) -gt $deadline) {
+                throw "Timed out after ${TimeoutSeconds}s waiting for lock: $LockPath (another postprocess.ps1 instance may be stuck)"
+            }
+            # Small random jitter, not a fixed interval, so multiple waiters
+            # queued on the same lock don't all wake up and re-collide on
+            # the exact same tick.
+            Start-Sleep -Milliseconds (Get-Random -Minimum 100 -Maximum 400)
+        }
+    }
+}
+function Exit-Lock {
+    param($LockHandle)
+    if ($LockHandle) { $LockHandle.Close(); $LockHandle.Dispose() }
+}
 
 try {
     # FilePath = .../<Uploader> - <Date> - <Id> - <Title>/Final files/<name>.mkv
@@ -144,7 +209,7 @@ try {
     # boundaries aren't available for multi-video sessions since yt-dlp
     # doesn't mark them. This matches how you actually run it (one URL
     # per invocation), where it's a perfect 1:1 copy.
-    $mainDownloadLog = Join-Path $dataRoot "Archive Logs/Logs/download.log"
+    $mainDownloadLog = Join-Path $dataRoot "Archive Logs/Logs/$LogFileName"
     $completeLogFile = Join-Path $logsDir "video_complete.log"
     $sessionLines = $null
     if (Test-Path $mainDownloadLog) {
@@ -409,121 +474,166 @@ try {
     $manifest | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $videoMetaDir "manifest.json")
     Log "Wrote manifest.json."
 
-    # --- Channel manifest (#15) ---
-    $channelManifestPath = Join-Path $channelDir "channel_manifest.json"
-    $channelManifest = if (Test-Path $channelManifestPath) {
-        Get-Content $channelManifestPath -Raw | ConvertFrom-Json
-    } else { @() }
-    $channelManifest = @($channelManifest | Where-Object { $_.video_id -ne $videoId })
-    $channelManifest += [ordered]@{ video_id = $videoId; title = $title; upload_date = $uploadDate; url = $originalUrl; folder = $videoDir }
-    $channelManifest | ConvertTo-Json -Depth 4 | Set-Content $channelManifestPath
-
     # --- Global manifest (#14 / #15) ---
+    # Locked separately from the channel-scoped block below, with its OWN
+    # lock file at the Youtube Videos/ root rather than inside $channelDir --
+    # this file is shared across EVERY channel, so two videos finishing at
+    # the same time from two DIFFERENT channels still need to serialize
+    # here, even though they won't contend on the per-channel lock at all.
     $globalManifestPath = Join-Path $youtubeRoot "global_manifest.json"
-    $globalManifest = if (Test-Path $globalManifestPath) {
-        Get-Content $globalManifestPath -Raw | ConvertFrom-Json
-    } else { @() }
-    $globalManifest = @($globalManifest | Where-Object { $_.video_id -ne $videoId })
-    $globalManifest += [ordered]@{ video_id = $videoId; title = $title; uploader = $uploader; upload_date = $uploadDate; url = $originalUrl; folder = $videoDir }
-    $globalManifest | ConvertTo-Json -Depth 4 | Set-Content $globalManifestPath
-
-    Log "Updated channel and global manifests."
-
-    # --- Channel-level assets: avatar, banner, description, channel info.json ---
-    # Lives outside the individual video folders, at the channel root, and is
-    # refreshed (overwritten) every time a video from this channel finishes.
+    $globalLockPath = Join-Path $youtubeRoot ".global_manifest.lock"
+    $globalLock = Enter-Lock -LockPath $globalLockPath
     try {
-        $channelInfoDir = Join-Path $channelDir "Channel Info"
-        if (!(Test-Path $channelInfoDir)) {
-            New-Item -ItemType Directory -Path $channelInfoDir -Force | Out-Null
-        }
-
-        # Throttle: skip re-fetching if we already refreshed recently. This matters
-        # most when running against a whole channel/playlist in one go, so we don't
-        # hit the channel's About page once per video in a 100+ video run.
-        $throttleMarker = Join-Path $channelInfoDir ".last_refresh"
-        $throttleHours = 6
-        $needsRefresh = $true
-        if (Test-Path $throttleMarker) {
-            $age = (Get-Date) - (Get-Item $throttleMarker).LastWriteTime
-            if ($age.TotalHours -lt $throttleHours) { $needsRefresh = $false }
-        }
-
-        if (-not $channelUrl) {
-            Log "No channel_url found in info.json — skipped Channel Info refresh."
-        } elseif (-not $needsRefresh) {
-            Log "Channel Info refreshed within the last $throttleHours hours — skipped."
-        } else {
-            # Only clear the folder once we're actually about to repopulate it.
-            # Join-Path (not a literal "\*" suffix, which only means anything
-            # on Windows) so this works whichever OS this happens to run on.
-            Remove-Item -Path (Join-Path $channelInfoDir "*") -Recurse -Force -ErrorAction SilentlyContinue
-
-            & yt-dlp `
-                --ignore-config `
-                --skip-download `
-                --flat-playlist `
-                --playlist-items 0 `
-                --write-info-json `
-                --write-all-thumbnails `
-                --write-description `
-                -o (Join-Path $channelInfoDir "channel.%(ext)s") `
-                $channelUrl 2>&1 | ForEach-Object { Log "  [channel-info] $_" }
-
-            Set-Content -Path $throttleMarker -Value (Get-Date -Format "o")
-            Log "Refreshed Channel Info for $uploader."
-        }
+        $globalManifest = if (Test-Path $globalManifestPath) {
+            Get-Content $globalManifestPath -Raw | ConvertFrom-Json
+        } else { @() }
+        $globalManifest = @($globalManifest | Where-Object { $_.video_id -ne $videoId })
+        $globalManifest += [ordered]@{ video_id = $videoId; title = $title; uploader = $uploader; upload_date = $uploadDate; url = $originalUrl; folder = $videoDir }
+        $globalManifest | ConvertTo-Json -Depth 4 | Set-Content $globalManifestPath
+    } finally {
+        Exit-Lock -LockHandle $globalLock
     }
-    catch {
-        Log "WARNING: Channel Info refresh failed: $($_.Exception.Message)"
-    }
+    Log "Updated global manifest."
 
-    # --- Sync the "Final Video" per-channel repository ---
-    # A separate, flat "finished output" tree at Youtube Videos/Final Video/
-    # <uploader>/, parallel to Complete Archive -- meant as the one place
-    # to point a media player or another machine at, without pulling in
-    # the full per-video folder tree (subtitles/description/checksums/etc)
-    # that Complete Archive carries for every video. This is now the ONLY
-    # "plain video" copy the pipeline maintains (the separate "Pure Video"
-    # repository was removed -- it duplicated this folder's purpose almost
-    # exactly, and having both was more confusing than useful). This also
-    # carries a synced copy of that channel's manifest and Channel Info
-    # assets, refreshed every run, plus a synced copy of the global
-    # manifest at the repository root.
+    # --- Channel manifest, Channel Info refresh, and Final Video sync ---
+    # All three grouped under ONE per-channel lock (lock file inside
+    # $channelDir itself, so different channels never contend with each
+    # other -- only videos from the SAME channel finishing around the same
+    # time do). Grouped together rather than three separate locks because
+    # the Final Video sync below reads $channelManifestPath and
+    # $channelInfoDir right after they're written -- keeping the whole
+    # sequence under one lock means Final Video always sees this video's
+    # own channel-manifest update and never a half-written or
+    # about-to-be-overwritten intermediate state from a concurrent sibling
+    # video in the same channel. This section is pure local file I/O (no
+    # network calls except the throttled Channel Info refresh, which most
+    # invocations skip entirely), so serializing it costs negligible time
+    # even at high worker counts -- the actual expensive, parallelizable
+    # work (the comments fetch, the ffmpeg re-embed) all happens BEFORE
+    # this point, unlocked.
+    $channelLockPath = Join-Path $channelDir ".postprocess.lock"
+    $channelLock = Enter-Lock -LockPath $channelLockPath
     try {
-        $finalVideoRoot        = Join-Path $youtubeRoot "Final Video"
-        $finalVideoChannelDir  = Join-Path $finalVideoRoot $uploader
-        if (!(Test-Path $finalVideoChannelDir)) {
-            New-Item -ItemType Directory -Path $finalVideoChannelDir -Force | Out-Null
-        }
+        # --- Channel manifest (#15) ---
+        $channelManifestPath = Join-Path $channelDir "channel_manifest.json"
+        $channelManifest = if (Test-Path $channelManifestPath) {
+            Get-Content $channelManifestPath -Raw | ConvertFrom-Json
+        } else { @() }
+        $channelManifest = @($channelManifest | Where-Object { $_.video_id -ne $videoId })
+        $channelManifest += [ordered]@{ video_id = $videoId; title = $title; upload_date = $uploadDate; url = $originalUrl; folder = $videoDir }
+        $channelManifest | ConvertTo-Json -Depth 4 | Set-Content $channelManifestPath
+        Log "Updated channel manifest."
 
-        # Full descriptive filename, built from the already-sanitized
-        # folder name rather than reconstructed from raw (unsanitized)
-        # info.json fields -- the folder name has already been through
-        # yt-dlp's own filename sanitization, so reusing it avoids
-        # re-doing (and potentially mismatching) that logic here.
-        $finalVideoFileName = (Split-Path $videoDir -Leaf) + [System.IO.Path]::GetExtension($FilePath)
-        Copy-Item -Path $FilePath -Destination (Join-Path $finalVideoChannelDir $finalVideoFileName) -Force
-
-        if (Test-Path $channelManifestPath) {
-            Copy-Item -Path $channelManifestPath -Destination (Join-Path $finalVideoChannelDir "channel_manifest.json") -Force
-        }
-
-        if (Test-Path $channelInfoDir) {
-            $finalVideoChannelInfoDir = Join-Path $finalVideoChannelDir "Channel Info"
-            if (Test-Path $finalVideoChannelInfoDir) {
-                Remove-Item -Path $finalVideoChannelInfoDir -Recurse -Force -ErrorAction SilentlyContinue
+        # --- Channel-level assets: avatar, banner, description, channel info.json ---
+        # Lives outside the individual video folders, at the channel root, and is
+        # refreshed (overwritten) every time a video from this channel finishes.
+        try {
+            $channelInfoDir = Join-Path $channelDir "Channel Info"
+            if (!(Test-Path $channelInfoDir)) {
+                New-Item -ItemType Directory -Path $channelInfoDir -Force | Out-Null
             }
-            Copy-Item -Path $channelInfoDir -Destination $finalVideoChannelInfoDir -Recurse -Force
+
+            # Throttle: skip re-fetching if we already refreshed recently. This
+            # matters most when running against a whole channel/playlist, so
+            # we don't hit the channel's About page once per video in a
+            # 100+ video run -- and now that this whole block is behind the
+            # per-channel lock, the throttle check-then-act is also safe
+            # against two workers both deciding "needs refresh" at once and
+            # both clearing/repopulating Channel Info concurrently.
+            $throttleMarker = Join-Path $channelInfoDir ".last_refresh"
+            $throttleHours = 6
+            $needsRefresh = $true
+            if (Test-Path $throttleMarker) {
+                $age = (Get-Date) - (Get-Item $throttleMarker).LastWriteTime
+                if ($age.TotalHours -lt $throttleHours) { $needsRefresh = $false }
+            }
+
+            if (-not $channelUrl) {
+                Log "No channel_url found in info.json — skipped Channel Info refresh."
+            } elseif (-not $needsRefresh) {
+                Log "Channel Info refreshed within the last $throttleHours hours — skipped."
+            } else {
+                # Only clear the folder once we're actually about to repopulate it.
+                # Join-Path (not a literal "\*" suffix, which only means anything
+                # on Windows) so this works whichever OS this happens to run on.
+                Remove-Item -Path (Join-Path $channelInfoDir "*") -Recurse -Force -ErrorAction SilentlyContinue
+
+                & yt-dlp `
+                    --ignore-config `
+                    --skip-download `
+                    --flat-playlist `
+                    --playlist-items 0 `
+                    --write-info-json `
+                    --write-all-thumbnails `
+                    --write-description `
+                    -o (Join-Path $channelInfoDir "channel.%(ext)s") `
+                    $channelUrl 2>&1 | ForEach-Object { Log "  [channel-info] $_" }
+
+                Set-Content -Path $throttleMarker -Value (Get-Date -Format "o")
+                Log "Refreshed Channel Info for $uploader."
+            }
+        }
+        catch {
+            Log "WARNING: Channel Info refresh failed: $($_.Exception.Message)"
         }
 
-        if (Test-Path $globalManifestPath) {
-            Copy-Item -Path $globalManifestPath -Destination (Join-Path $finalVideoRoot "global_manifest.json") -Force
-        }
+        # --- Sync the "Final Video" per-channel repository ---
+        # A separate, flat "finished output" tree at Youtube Videos/Final Video/
+        # <uploader>/, parallel to Complete Archive -- meant as the one place
+        # to point a media player or another machine at, without pulling in
+        # the full per-video folder tree (subtitles/description/checksums/etc)
+        # that Complete Archive carries for every video. This is now the ONLY
+        # "plain video" copy the pipeline maintains (the separate "Pure Video"
+        # repository was removed -- it duplicated this folder's purpose almost
+        # exactly, and having both was more confusing than useful). This also
+        # carries a synced copy of that channel's manifest and Channel Info
+        # assets, refreshed every run, plus a synced copy of the global
+        # manifest at the repository root.
+        try {
+            $finalVideoRoot        = Join-Path $youtubeRoot "Final Video"
+            $finalVideoChannelDir  = Join-Path $finalVideoRoot $uploader
+            if (!(Test-Path $finalVideoChannelDir)) {
+                New-Item -ItemType Directory -Path $finalVideoChannelDir -Force | Out-Null
+            }
 
-        Log "Synced Final Video repository for $uploader."
-    } catch {
-        Log "WARNING: Failed to sync Final Video repository: $($_.Exception.Message)"
+            # Full descriptive filename, built from the already-sanitized
+            # folder name rather than reconstructed from raw (unsanitized)
+            # info.json fields -- the folder name has already been through
+            # yt-dlp's own filename sanitization, so reusing it avoids
+            # re-doing (and potentially mismatching) that logic here.
+            $finalVideoFileName = (Split-Path $videoDir -Leaf) + [System.IO.Path]::GetExtension($FilePath)
+            Copy-Item -Path $FilePath -Destination (Join-Path $finalVideoChannelDir $finalVideoFileName) -Force
+
+            if (Test-Path $channelManifestPath) {
+                Copy-Item -Path $channelManifestPath -Destination (Join-Path $finalVideoChannelDir "channel_manifest.json") -Force
+            }
+
+            if (Test-Path $channelInfoDir) {
+                $finalVideoChannelInfoDir = Join-Path $finalVideoChannelDir "Channel Info"
+                if (Test-Path $finalVideoChannelInfoDir) {
+                    Remove-Item -Path $finalVideoChannelInfoDir -Recurse -Force -ErrorAction SilentlyContinue
+                }
+                Copy-Item -Path $channelInfoDir -Destination $finalVideoChannelInfoDir -Recurse -Force
+            }
+
+            # Read outside the global lock (which was already released
+            # above) -- by this point the global manifest write for THIS
+            # video is fully committed, so this is just copying a stable,
+            # already-final file. A sibling video from a different channel
+            # updating the global manifest at the same moment isn't a
+            # correctness problem here, just eventual consistency: worst
+            # case this copy is one video "behind," and the next video
+            # processed anywhere in the archive corrects it.
+            if (Test-Path $globalManifestPath) {
+                Copy-Item -Path $globalManifestPath -Destination (Join-Path $finalVideoRoot "global_manifest.json") -Force
+            }
+
+            Log "Synced Final Video repository for $uploader."
+        } catch {
+            Log "WARNING: Failed to sync Final Video repository: $($_.Exception.Message)"
+        }
+    } finally {
+        Exit-Lock -LockHandle $channelLock
     }
 
     # --- Trim empty leftover folders under _incomplete (#5) ---
