@@ -136,20 +136,26 @@ try {
     # extension (e.g. "Final Video.f137.mp4", "Final Video.f251.m4a").
     # Several near-identically-named files sitting in the same folder is
     # exactly what caused the "which one of these is actually final?"
-    # confusion -- moving the pre-merge ones out into their own subfolder
-    # leaves only the real final file ("Final Video.mkv") at the top level
-    # of "Final files", with the raw streams still kept nearby, just no
-    # longer easy to mistake for it.
+    # confusion -- moving the pre-merge ones out leaves only the real final
+    # file ("Final Video.mkv") at the top level of "Final files", with the
+    # raw streams still kept nearby, just no longer easy to mistake for it.
+    # This now lands as "Pre-merge streams/", a sibling of "Final files"
+    # directly under the per-video folder (alongside Subtitles/, Images/,
+    # Video metadata/), rather than a subfolder nested inside "Final files"
+    # itself -- keeping "Final files" as a true single-purpose folder that
+    # only ever holds the actual final output (Final Video.mkv, Link.*),
+    # with the raw pre-merge streams treated as their own category
+    # entirely, the same way subtitles or thumbnails are.
     try {
         $preMergeFiles = Get-ChildItem -Path $finalFilesDir -File -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -ne $FilePath -and $_.Name -match '^Final Video\.f\S+\.' }
         if ($preMergeFiles) {
-            $preMergeDir = Join-Path $finalFilesDir "Pre-merge streams"
+            $preMergeDir = Join-Path $videoDir "Pre-merge streams"
             if (!(Test-Path $preMergeDir)) { New-Item -ItemType Directory -Path $preMergeDir -Force | Out-Null }
             foreach ($f in $preMergeFiles) {
                 Move-Item -Path $f.FullName -Destination (Join-Path $preMergeDir $f.Name) -Force
             }
-            Log "Moved $($preMergeFiles.Count) --keep-video pre-merge stream(s) into 'Pre-merge streams/' -- Final Video.mkv is the only true final output remaining in Final files."
+            Log "Moved $($preMergeFiles.Count) --keep-video pre-merge stream(s) into 'Pre-merge streams/' (sibling of 'Final files/') -- Final Video.mkv is the only file remaining in Final files."
         }
     } catch {
         Log "WARNING: Could not relocate --keep-video pre-merge streams: $($_.Exception.Message)"

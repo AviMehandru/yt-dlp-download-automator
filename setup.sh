@@ -334,8 +334,18 @@ if [ -d "$REPO_DIR" ]; then
 fi
 
 # --- Step 11: verify ---
+# NOTE: yt-dlp is installed to ${LOCAL_BIN} (not via apt), same as deno --
+# so it's checked via its full path below, same as deno's own check just
+# beneath it, rather than the bare "yt-dlp" command. Checking via bare
+# "yt-dlp" here previously produced a false "NOT FOUND" on a fresh install:
+# ${LOCAL_BIN} was only just added to PATH via ~/.bashrc a few lines up,
+# which (per the ytdl check's own caveat below) doesn't take effect until
+# a new shell -- so on a fresh install this step would ALWAYS report
+# yt-dlp missing immediately after successfully installing it two steps
+# earlier. ffmpeg/pwsh/git are unaffected since those are installed via
+# apt onto a location already on PATH.
 log "Verifying installation"
-echo "yt-dlp:  $(yt-dlp --version 2>/dev/null || echo 'NOT FOUND')"
+echo "yt-dlp:  $(${LOCAL_BIN}/yt-dlp --version 2>/dev/null || echo 'NOT FOUND')"
 echo "ffmpeg:  $(ffmpeg -version 2>/dev/null | head -n1 || echo 'NOT FOUND')"
 echo "pwsh:    $(pwsh --version 2>/dev/null || echo 'NOT FOUND')"
 echo "deno:    $(${LOCAL_BIN}/deno --version 2>/dev/null | head -n1 || echo 'NOT FOUND')"
