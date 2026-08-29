@@ -211,13 +211,31 @@ else
     fi
 fi
 
+# --- VMware guest detection (used by Step 8 below) ---
+# systemd-detect-virt is the primary check -- reliable on any systemd-based
+# Ubuntu install, which this always is. A DMI fallback is included as a
+# second, independent signal in case systemd-detect-virt is ever
+# inconclusive (e.g. it can report "none" from inside some nested-virt or
+# minimal-container setups even under VMware) -- VMware's virtual hardware
+# always identifies itself in the DMI product_name table regardless, so
+# this catches that case without depending on systemd's own detection at
+# all. Computed once, up front, so Step 8 (and anything else that might
+# ever need it) just reads the one $IS_VMWARE flag instead of re-running
+# the detection logic inline.
+IS_VMWARE=0
+if systemd-detect-virt 2>/dev/null | grep -qi vmware; then
+    IS_VMWARE=1
+elif [ -r /sys/class/dmi/id/product_name ] && grep -qi vmware /sys/class/dmi/id/product_name 2>/dev/null; then
+    IS_VMWARE=1
+fi
+
 # --- Step 8: VMware shared folder support (safe no-op outside VMware) ---
 # Deliberately does NOT reboot. A reboot would kill this script mid-run
 # (a shell script isn't a service -- it doesn't resume itself afterward),
 # and it isn't actually necessary: restarting the vmtoolsd service and
 # mounting directly gets the shared folder working immediately.
 log "Setting up VMware shared folder (open-vm-tools)"
-if systemd-detect-virt 2>/dev/null | grep -qi vmware; then
+if [ "$IS_VMWARE" -eq 1 ]; then
     if ! sudo apt install -y open-vm-tools open-vm-tools-desktop; then
         warn "open-vm-tools install failed (open-vm-tools-desktop in particular can fail on a minimal/headless install if its GUI dependencies don't resolve). Shared folder won't be available. Retry with: sudo apt install -y open-vm-tools (drop -desktop if you're headless)."
     else
@@ -237,7 +255,7 @@ if systemd-detect-virt 2>/dev/null | grep -qi vmware; then
         fi
     fi
 else
-    echo "Not detected as a VMware guest -- skipping shared folder setup."
+    echo "Not detected as a VMware guest (systemd-detect-virt and DMI both came back negative) -- skipping shared folder setup."
 fi
 
 # --- Step 9: folder structure ---
@@ -275,6 +293,10 @@ copy_file() {
     done
     warn "${src} not found in any of: ${candidates[*]} -- ${label} was NOT installed. Copy it to ${dest} manually."
 }
+# Snapshot the warning count right before these four copies -- compared
+# again below, after they've all run, to decide whether it's safe to
+# delete the cloned repo (see the cleanup block further down).
+WARNINGS_BEFORE_INSTALL="${#WARNINGS[@]}"
 copy_file "linux-run_ytdlp.ps1"   "${DATA_ROOT}/scripts/run_ytdlp.ps1"   "run_ytdlp.ps1"
 copy_file "linux-postprocess.ps1" "${DATA_ROOT}/scripts/postprocess.ps1" "postprocess.ps1"
 copy_file "linux-yt-dlp.conf"     "${DATA_ROOT}/configs/yt-dlp.conf"     "yt-dlp.conf"
@@ -286,6 +308,30 @@ fi
 if ! echo "$PATH" | tr ':' '\n' | grep -q "${LOCAL_BIN}"; then
     echo "export PATH=\"${LOCAL_BIN}:\$PATH\"" >> "${HOME}/.bashrc"
     echo "Added ${LOCAL_BIN} to PATH in ~/.bashrc -- run 'source ~/.bashrc' or start a new shell before using 'ytdl'."
+fi
+
+# --- Clean up the cloned installation files now that they're copied ---
+# ${REPO_DIR} ("YT-DLP Installation Files") is scratch: it exists only to
+# source the four pipeline files above. Once those are safely sitting in
+# their real destinations (under ${DATA_ROOT} and ${LOCAL_BIN}), there's no
+# reason to leave a second copy of the whole repo sitting on disk.
+#
+# Only deleted if every copy_file call above actually succeeded (checked
+# by comparing the warning count before/after that block, rather than
+# tracking each call's return value separately -- copy_file already
+# reports failures via warn(), so re-using that as the single source of
+# truth avoids keeping two parallel "did it work" mechanisms in sync). If
+# anything failed to install, the clone is deliberately left in place --
+# it may be the only remaining copy of a file that never made it to its
+# destination, so deleting it here would destroy the one thing you'd need
+# to fix the problem by hand.
+if [ -d "$REPO_DIR" ]; then
+    if [ "${#WARNINGS[@]}" -eq "$WARNINGS_BEFORE_INSTALL" ]; then
+        rm -rf "$REPO_DIR"
+        echo "Removed cloned installation files at '${REPO_DIR}' (already copied into place, no longer needed)."
+    else
+        echo "Leaving '${REPO_DIR}' in place -- at least one pipeline file above failed to install from it (see the WARNING(s) further up). Once that's resolved and you've confirmed everything under ${DATA_ROOT}/scripts and ${DATA_ROOT}/configs is correct, it's safe to delete manually."
+    fi
 fi
 
 # --- Step 11: verify ---
