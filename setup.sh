@@ -266,7 +266,6 @@ mkdir -p "${DATA_ROOT}/Archive Logs/Archive History"
 mkdir -p "${DATA_ROOT}/Archive Logs/Logs"
 mkdir -p "${DATA_ROOT}/Youtube Videos/Complete Archive"
 mkdir -p "${DATA_ROOT}/Youtube Videos/_incomplete"
-mkdir -p "${DATA_ROOT}/Youtube Videos/Pure Video"
 mkdir -p "${DATA_ROOT}/Youtube Videos/Final Video"
 echo "Folder structure created."
 
