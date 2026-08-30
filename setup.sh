@@ -61,10 +61,10 @@ echo "Logging full console output to: ${LOG_FILE}"
 # clone) already print their own real progress bars for their own work,
 # so this one only needs to answer "how far through the whole script am
 # I", not duplicate byte-level progress that's already visible.
-# TOTAL_STEPS must match the number of log() calls below (currently 11) --
+# TOTAL_STEPS must match the number of log() calls below (currently 12) --
 # if a step is ever added or removed, update this constant in the same
 # commit, or the bar will finish early/late relative to the actual work.
-TOTAL_STEPS=11
+TOTAL_STEPS=12
 CURRENT_STEP=0
 
 draw_progress_bar() {
@@ -258,7 +258,102 @@ else
     echo "Not detected as a VMware guest (systemd-detect-virt and DMI both came back negative) -- skipping shared folder setup."
 fi
 
-# --- Step 9: folder structure ---
+# --- Desktop-environment detection (used by Step 9 below) ---
+# Checked by looking for an installed file manager / desktop metapackage
+# rather than reading $XDG_CURRENT_DESKTOP or $DISPLAY: those describe the
+# session this script happens to be RUNNING in, which is wrong twice over
+# -- setup run over SSH into a VM that does have a desktop would look
+# headless, and nothing here needs a GUI at install time anyway, only at
+# the point someone later opens the file manager. What actually matters is
+# whether a desktop is INSTALLED, which is what this tests. Skipping on a
+# genuinely headless box matters because the packages below pull in a
+# large GUI dependency tree that would be dead weight on a server install.
+HAS_DESKTOP=0
+for gui_bin in nautilus nemo thunar dolphin pcmanfm; do
+    if command -v "$gui_bin" >/dev/null 2>&1; then
+        HAS_DESKTOP=1
+        break
+    fi
+done
+if [ "$HAS_DESKTOP" -eq 0 ]; then
+    for gui_pkg in ubuntu-desktop ubuntu-desktop-minimal kubuntu-desktop xubuntu-desktop; do
+        if dpkg -s "$gui_pkg" >/dev/null 2>&1; then
+            HAS_DESKTOP=1
+            break
+        fi
+    done
+fi
+
+# --- Step 9: viewing thumbnails and subtitles in the desktop ---
+# Nothing in the pipeline itself needs any of this -- it downloads and
+# post-processes identically without it. This is purely so the archive is
+# BROWSABLE from inside the VM: thumbnail images that preview in the file
+# manager instead of showing a generic icon, and a player that actually
+# renders the subtitle tracks next to each video.
+#
+# Split into two independent apt calls rather than one combined package
+# list, so a failure in one group (e.g. a player package temporarily
+# unavailable) doesn't take the other group down with it -- same
+# keep-going principle as the rest of this script.
+log "Installing desktop preview support (thumbnails and subtitles)"
+if [ "$HAS_DESKTOP" -eq 0 ]; then
+    echo "No desktop environment detected (no file manager or desktop metapackage installed) -- skipping. The pipeline itself is unaffected; re-run this script after installing a desktop if you later want in-VM previews."
+else
+    # Thumbnailers.
+    #   webp-pixbuf-loader -- yt-dlp saves the ORIGINAL thumbnail in
+    #     whatever format YouTube served, which for YouTube is almost
+    #     always .webp. GTK/Nautilus cannot render webp at all without
+    #     this loader, so Images/Thumbnail.webp shows a generic icon and
+    #     won't open in the image viewer either. (postprocess.ps1 also
+    #     writes a Thumbnail.png alongside it, which displays fine
+    #     regardless -- this is what makes the original viewable too.)
+    #   ffmpegthumbnailer -- installs a .thumbnailer entry that lets the
+    #     file manager generate poster frames for the .mkv files
+    #     themselves, so Final Video.mkv previews as its own first frame.
+    #   gnome-sushi -- spacebar preview in Nautilus: works on the images,
+    #     on the videos, and on the .vtt subtitle files as plain text,
+    #     without opening a separate application for each.
+    if ! sudo apt install -y webp-pixbuf-loader ffmpegthumbnailer gnome-sushi; then
+        warn "Thumbnailer install failed. Thumbnails (especially the original .webp) may show as generic icons in the file manager. Retry with: sudo apt install -y webp-pixbuf-loader ffmpegthumbnailer gnome-sushi"
+    fi
+
+    # Players. Both handle the subtitles this pipeline produces two
+    # different ways: the tracks muxed into the .mkv by --embed-subs, and
+    # the sidecar .vtt files under each video's Subtitles/ folder. mpv is
+    # the lightweight one; vlc is included as well because its subtitle
+    # track menu is far more discoverable, and it auto-loads a sidecar
+    # subtitle file sitting next to the video without being asked.
+    if ! sudo apt install -y mpv vlc; then
+        warn "Video player install failed -- you'll have no way to view subtitles rendered over the video from inside the VM. Retry with: sudo apt install -y mpv vlc"
+    fi
+
+    # Nautilus refuses to thumbnail files above a size cap, which defaults
+    # to 10 MB -- far below any real video here, so without raising it the
+    # ffmpegthumbnailer install above would appear to do nothing at all for
+    # the .mkv files (the thumbnailer is installed and working; it just
+    # never gets invoked). Nautilus's own schema documents this value as
+    # megabytes, so 4096 = 4 GB, comfortably above a long 4K download.
+    #
+    # Guarded on the key actually existing rather than set blindly: this
+    # key has come and gone across GNOME versions, and `gsettings set` on
+    # a key the installed schema doesn't have is a hard error, not a
+    # no-op. Also skipped when there's no session bus to write to (a
+    # sudo/SSH context), where gsettings would fail for an unrelated
+    # reason.
+    if ! command -v gsettings >/dev/null 2>&1; then
+        echo "gsettings not available -- skipped raising the Nautilus thumbnail size limit."
+    elif ! gsettings list-keys org.gnome.nautilus.preferences 2>/dev/null | grep -qx 'thumbnail-limit'; then
+        echo "No 'thumbnail-limit' key in this GNOME version's Nautilus schema -- nothing to raise, skipping (video thumbnails should work regardless)."
+    elif gsettings set org.gnome.nautilus.preferences thumbnail-limit 4096 2>/dev/null; then
+        echo "Raised the Nautilus thumbnail size limit to 4096 MB (default is 10 MB, which is below every video this pipeline produces)."
+    else
+        warn "Could not raise the Nautilus thumbnail size limit. Video files larger than the current limit will show a generic icon instead of a poster frame. Set it yourself from a desktop terminal with: gsettings set org.gnome.nautilus.preferences thumbnail-limit 4096"
+    fi
+
+    echo "Note: the file manager caches thumbnails, so folders you already browsed before this step may keep showing generic icons. Log out and back in (or run 'rm -rf ~/.cache/thumbnails' and reopen the file manager) to force them to regenerate."
+fi
+
+# --- Step 10: folder structure ---
 log "Creating folder structure under ${DATA_ROOT}"
 mkdir -p "${DATA_ROOT}/scripts"
 mkdir -p "${DATA_ROOT}/configs"
@@ -269,7 +364,7 @@ mkdir -p "${DATA_ROOT}/Youtube Videos/_incomplete"
 mkdir -p "${DATA_ROOT}/Youtube Videos/Final Video"
 echo "Folder structure created."
 
-# --- Step 10: place the four pipeline files ---
+# --- Step 11: place the four pipeline files ---
 # Looks in three places, in order: next to setup.sh itself, inside the
 # cloned repo's root, and inside a "linux" subfolder of the cloned repo
 # (covering the most likely layouts without guessing further). Each file
@@ -333,7 +428,7 @@ if [ -d "$REPO_DIR" ]; then
     fi
 fi
 
-# --- Step 11: verify ---
+# --- Step 12: verify ---
 # NOTE: yt-dlp is installed to ${LOCAL_BIN} (not via apt), same as deno --
 # so it's checked via its full path below, same as deno's own check just
 # beneath it, rather than the bare "yt-dlp" command. Checking via bare
@@ -351,9 +446,20 @@ echo "pwsh:    $(pwsh --version 2>/dev/null || echo 'NOT FOUND')"
 echo "deno:    $(${LOCAL_BIN}/deno --version 2>/dev/null | head -n1 || echo 'NOT FOUND')"
 echo "git:     $(git --version 2>/dev/null || echo 'NOT FOUND')"
 echo "ytdl:    $(command -v ytdl || echo 'NOT FOUND (open a new shell if PATH was just updated)')"
+# Desktop-only, and only meaningful if Step 9 actually ran -- reported as
+# "skipped (no desktop)" rather than "NOT FOUND" on a headless install, so
+# a deliberate skip doesn't read as a failure in the summary.
+if [ "$HAS_DESKTOP" -eq 1 ]; then
+    echo "mpv:     $(mpv --version 2>/dev/null | head -n1 || echo 'NOT FOUND')"
+    echo "vlc:     $(vlc --version 2>/dev/null | head -n1 || echo 'NOT FOUND')"
+    echo "webp:    $(dpkg -s webp-pixbuf-loader >/dev/null 2>&1 && echo 'webp-pixbuf-loader installed (.webp thumbnails will render)' || echo 'NOT FOUND')"
+    echo "vidthumb: $([ -f /usr/share/thumbnailers/ffmpegthumbnailer.thumbnailer ] && echo 'ffmpegthumbnailer installed (.mkv poster frames will render)' || echo 'NOT FOUND')"
+else
+    echo "previews: skipped (no desktop environment detected)"
+fi
 
 # NOTE: this final summary deliberately does NOT call log() -- log() is
-# what advances the step counter, and all 11 real steps are already done
+# what advances the step counter, and all 12 real steps are already done
 # by this point. Calling it again here would push CURRENT_STEP past
 # TOTAL_STEPS and make the bar overshoot 100%/overflow its own math.
 echo ""

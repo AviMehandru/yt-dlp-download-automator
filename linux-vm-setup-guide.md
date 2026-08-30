@@ -1,6 +1,6 @@
 # Setting Up the yt-dlp Archival Pipeline on a Fresh Linux VM
 
-> **Shortcut:** `setup.sh` (attached alongside the four pipeline files) automates every step below (1 through 9) in one run. Place it in the same folder as `linux-ytdl`, `linux-run_ytdlp.ps1`, `linux-postprocess.ps1`, and `linux-yt-dlp.conf`, then run `chmod +x setup.sh && ./setup.sh`. It's idempotent -- safe to re-run if you want to retry a step that needed manual attention. It does **not** hard-abort on a failed non-critical step (an earlier version did, which is what caused `ytdl` not to get installed automatically the first time around -- see the note in Step 7 below); instead it prints a summary of anything that needs a manual look at the very end. The manual steps below are still here for reference, or if you want to run things by hand.
+> **Shortcut:** `setup.sh` (attached alongside the four pipeline files) automates every step below (1 through 11) in one run. Place it in the same folder as `linux-ytdl`, `linux-run_ytdlp.ps1`, `linux-postprocess.ps1`, and `linux-yt-dlp.conf`, then run `chmod +x setup.sh && ./setup.sh`. It's idempotent -- safe to re-run if you want to retry a step that needed manual attention. It also does one thing with no manual equivalent below: it clones this repo into a scratch folder to source the four pipeline files from, then deletes that clone once they're copied into place -- unnecessary when you already have the files in front of you, which is the case if you're following these steps by hand. Step 12 (the first test run) is yours to do either way. It does **not** hard-abort on a failed non-critical step (an earlier version did, which is what caused `ytdl` not to get installed automatically the first time around -- see the note in Step 7 below); instead it prints a summary of anything that needs a manual look at the very end. The manual steps below are still here for reference, or if you want to run things by hand.
 
 As of this version, `setup.sh` and the pipeline files are also fully
 **username- and path-independent** -- nothing below needs any
@@ -20,7 +20,7 @@ sudo apt update && sudo apt upgrade -y
 ## Step 2: Install base dependencies
 
 ```bash
-sudo apt install -y curl wget ffmpeg ca-certificates apt-transport-https software-properties-common python3-pip
+sudo apt install -y curl wget git ffmpeg ca-certificates apt-transport-https software-properties-common python3-pip
 ```
 
 Verify:
@@ -38,14 +38,23 @@ because `run_ytdlp.ps1` calls `yt-dlp -U` for self-updates, which only
 actually does anything for a standalone-binary install — it silently no-ops
 if yt-dlp came from `apt`.
 
+Install it into `$HOME/.local/bin`, **not** `/usr/local/bin`. A real run
+showed self-update failing even after `chown`ing the binary itself:
+yt-dlp's updater writes a temp file into the **containing directory** and
+renames it over the old binary, and `/usr/local/bin` is root-owned no
+matter who owns the file inside it. Installing into a directory you
+already own outright sidesteps the problem instead of patching around it.
+
 ```bash
-sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
-sudo chmod a+rx /usr/local/bin/yt-dlp
+mkdir -p "$HOME/.local/bin"
+curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o "$HOME/.local/bin/yt-dlp"
+chmod a+rx "$HOME/.local/bin/yt-dlp"
 ```
 
-Verify:
+Verify (by full path — `~/.local/bin` may not be on this shell's `PATH`
+until Step 10 adds it and you open a new shell):
 ```bash
-yt-dlp --version
+"$HOME/.local/bin/yt-dlp" --version
 ```
 
 ---
@@ -125,20 +134,25 @@ resolve it (see yt-dlp/yt-dlp#14404).
 Install Deno:
 ```bash
 curl -fsSL https://deno.land/install.sh | sh -s -- -y
-sudo cp "$HOME/.deno/bin/deno" /usr/local/bin/deno
-sudo chmod a+rx /usr/local/bin/deno
+mkdir -p "$HOME/.local/bin"
+cp "$HOME/.deno/bin/deno" "$HOME/.local/bin/deno"
+chmod a+rx "$HOME/.local/bin/deno"
 ```
 
 Verify:
 ```bash
-deno --version
+"$HOME/.local/bin/deno" --version
 ```
 
-`yt-dlp.conf` already points at this fixed location
-(`--js-runtimes "deno:/usr/local/bin/deno"`), rather than relying on `deno`
-merely being somewhere on your interactive shell's `PATH` — that matters
-because the `PATH` inside yt-dlp's own process (and anything it spawns)
-isn't guaranteed to match your shell's.
+`$HOME/.local/bin/deno` is the exact path the pipeline looks for, so don't
+substitute another location without updating the pipeline too. It's
+`run_ytdlp.ps1` that passes `--js-runtimes "deno:$HOME/.local/bin/deno"`,
+built fresh from `$HOME` at invocation time — **not** `yt-dlp.conf`, which
+is deliberately static, username-independent text with no per-user paths
+in it at all (yt-dlp config files are read as plain text and never expand
+`~` or `$HOME`). Passing it explicitly also means yt-dlp doesn't have to
+find `deno` on a `PATH`, which inside yt-dlp's own process — and anything
+it spawns — isn't guaranteed to match your interactive shell's.
 
 > If you already ran a video through the pipeline before installing Deno
 > and hit a 403 partway through, just re-run the same URL — the
@@ -202,7 +216,79 @@ drop in the four pipeline files from the host instead of re-typing them.
 
 ---
 
-## Step 8: Create the folder structure
+## Step 8: Install desktop preview support (thumbnails and subtitles)
+
+Optional, and desktop-only. Nothing in the pipeline needs any of this —
+downloads and post-processing behave identically without it. This is
+purely so the finished archive is **browsable from inside the VM**:
+thumbnails that preview in the file manager instead of showing generic
+icons, and a player that renders the subtitle tracks over the video.
+Skip this entirely on a headless/server install (`setup.sh` detects that
+case and skips it for you); the packages pull in a large GUI dependency
+tree that would be dead weight there.
+
+**8a. Thumbnailers:**
+```bash
+sudo apt install -y webp-pixbuf-loader ffmpegthumbnailer gnome-sushi
+```
+
+- `webp-pixbuf-loader` is the one that matters most. yt-dlp saves the
+  **original** thumbnail in whatever format YouTube served, which is
+  essentially always `.webp`, and GTK/Nautilus cannot render webp at all
+  without this loader — so `Images/Thumbnail.webp` shows a generic icon
+  and won't open in the image viewer either. (`postprocess.ps1` also
+  writes a `Thumbnail.png` next to it, which displays fine regardless;
+  this is what makes the original viewable too.)
+- `ffmpegthumbnailer` installs a `.thumbnailer` entry so `Final
+  Video.mkv` previews as its own poster frame rather than a generic film
+  icon.
+- `gnome-sushi` gives you spacebar preview in Nautilus — works on the
+  images, the videos, **and** the `.vtt` subtitle files as plain text,
+  without opening a separate application for each.
+
+**8b. A player that shows the subtitles:**
+```bash
+sudo apt install -y mpv vlc
+```
+
+Both handle the subtitles this pipeline produces in each of the two forms
+it writes them: the tracks muxed into the `.mkv` by `--embed-subs`, and
+the sidecar `.vtt` files under each video's `Subtitles/` folder. `mpv` is
+the lightweight one; `vlc` is worth having as well because its subtitle
+track menu is far more discoverable, and it auto-loads a sidecar subtitle
+file sitting next to the video without being asked.
+
+**8c. Raise the Nautilus thumbnail size limit:**
+```bash
+gsettings set org.gnome.nautilus.preferences thumbnail-limit 4096
+```
+
+Nautilus refuses to thumbnail files above a size cap that **defaults to 10
+MB** — far below any real video here. Without raising it, the
+`ffmpegthumbnailer` install above appears to do nothing at all for your
+`.mkv` files: the thumbnailer is installed and working, it just never gets
+invoked. The value is in megabytes per Nautilus's own schema, so 4096 = 4
+GB, comfortably above a long 4K download.
+
+> If this errors with something like *"No such key"*, your GNOME version's
+> Nautilus schema doesn't have that key — it has come and gone across
+> releases. That's harmless; skip it and video thumbnails should still
+> work. (`setup.sh` checks for the key before setting it, for this
+> reason.)
+
+**8d. Clear stale thumbnail caches:**
+
+The file manager caches thumbnails, so any folder you already browsed
+*before* installing the loaders above will keep showing generic icons.
+Force them to regenerate:
+```bash
+rm -rf ~/.cache/thumbnails
+```
+Then reopen the file manager (or log out and back in).
+
+---
+
+## Step 9: Create the folder structure
 
 ```bash
 mkdir -p "$HOME/yt-dlp/scripts"
@@ -211,7 +297,6 @@ mkdir -p "$HOME/yt-dlp/Archive Logs/Archive History"
 mkdir -p "$HOME/yt-dlp/Archive Logs/Logs"
 mkdir -p "$HOME/yt-dlp/Youtube Videos/Complete Archive"
 mkdir -p "$HOME/yt-dlp/Youtube Videos/_incomplete"
-mkdir -p "$HOME/yt-dlp/Youtube Videos/Pure Video"
 mkdir -p "$HOME/yt-dlp/Youtube Videos/Final Video"
 ```
 
@@ -220,7 +305,7 @@ later wipe doesn't require redoing this step by hand.)
 
 ---
 
-## Step 9: Place the four pipeline files and put `ytdl` on your `PATH`
+## Step 10: Place the four pipeline files and put `ytdl` on your `PATH`
 
 ```bash
 cp linux-run_ytdlp.ps1   "$HOME/yt-dlp/scripts/run_ytdlp.ps1"
@@ -244,23 +329,39 @@ source ~/.bashrc
 
 ---
 
-## Step 10: Verify everything is wired up
+## Step 11: Verify everything is wired up
 
 ```bash
-which ytdl
-yt-dlp --version
-ffmpeg -version
+"$HOME/.local/bin/yt-dlp" --version
+ffmpeg -version | head -n 1
 pwsh --version
-deno --version
+"$HOME/.local/bin/deno" --version | head -n 1
+git --version
+command -v ytdl
 head -n 1 "$HOME/yt-dlp/configs/yt-dlp.conf"
 ```
 
-All five tools should resolve without error, and the last command should
+All of these should resolve without error, and the last command should
 print the current `CONFIG_VERSION` line.
+
+`yt-dlp` and `deno` are checked **by full path** on purpose. Both live in
+`$HOME/.local/bin`, which Step 10 may have only just appended to
+`~/.bashrc` — that doesn't take effect until you open a new shell, so a
+bare `yt-dlp --version` here can report "not found" immediately after a
+perfectly successful install. `ffmpeg`/`pwsh`/`git` are unaffected, being
+apt-installed onto a location already on `PATH`.
+
+If you did Step 8, these should work too (skip if you went headless):
+```bash
+mpv --version | head -n 1
+vlc --version | head -n 1
+dpkg -s webp-pixbuf-loader >/dev/null 2>&1 && echo "webp thumbnails: OK"
+[ -f /usr/share/thumbnailers/ffmpegthumbnailer.thumbnailer ] && echo "video thumbnails: OK"
+```
 
 ---
 
-## Step 11: First real test run
+## Step 12: First real test run
 
 Pick a short, low-comment-count video for the first run:
 ```bash
@@ -304,11 +405,12 @@ $HOME/yt-dlp/  <or a custom -DataRoot>
 └── Youtube Videos/
     ├── Complete Archive/
     ├── _incomplete/
-    ├── Pure Video/
     └── Final Video/
 
 $HOME/.local/bin/
-└── ytdl                  (entry point, on PATH)
+├── ytdl                  (entry point, on PATH)
+├── yt-dlp                (standalone binary -- here, not /usr/local/bin, so -U can self-update)
+└── deno                  (exact path run_ytdlp.ps1 passes via --js-runtimes)
 
 /mnt/hgfs/<share-name>/   (VMware shared folder, host <-> guest)
 ```
