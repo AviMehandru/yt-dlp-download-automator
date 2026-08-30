@@ -265,22 +265,34 @@ $timestamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
 $updateThrottleMarker = Join-Path $installRoot ".last_dependency_check"
 $updateThrottleHours = 24
 $needsDependencyCheck = $true
-# Wrapped in try/catch rather than a bare Test-Path/Get-Item pair: a real
-# run hit a case where Test-Path reported the marker existed but Get-Item
-# immediately after could not find it (root cause unconfirmed -- possibly
-# a filesystem-level inconsistency from an earlier forced VM reboot; see
-# the setup guide's note on "sudo reboot -f" -- but the fix doesn't depend
-# on knowing why). Get-Item failing used to throw a non-terminating error
-# that then cascaded into a SECOND error (subtracting from $null), and
-# crucially, neither error was wrapped in Tee-Object -- they're both above
-# where $logFile even starts being written to -- so they went straight to
-# the terminal and never appeared in download.log at all. Any failure
-# here now just falls back to the safe default (treat it as needing a
-# fresh check) instead of crashing partway through, and gets logged
-# properly instead of vanishing.
+# ROOT CAUSE FOUND -- and it was not what the previous comment here
+# guessed. This block used to say the "Test-Path says it exists but
+# Get-Item cannot find it" behaviour was unexplained, and speculated about
+# filesystem inconsistency after a forced VM reboot. It is nothing so
+# exotic: PowerShell maps the Unix "leading dot means hidden" convention
+# onto the Hidden file attribute, and Get-Item WITHOUT -Force refuses to
+# return a hidden item, throwing "Could not find item" while Test-Path on
+# the very same path returns true. ".last_dependency_check" is dot-
+# prefixed, so this reproduced 100% of the time on Linux and macOS, not
+# intermittently. It never happened on Windows, where a leading dot is
+# just an ordinary character -- which is why a Windows-first codebase
+# never saw it.
+#
+# The visible symptom was mild enough to be easy to miss: the catch below
+# falls back to "needs a check", so the throttle simply never engaged and
+# `yt-dlp -U` ran on EVERY invocation instead of once a day. The same root
+# cause was doing real damage in postprocess.ps1's Channel Info throttle,
+# where the throw escaped to a catch that skipped the refresh entirely --
+# see that file for the details.
+#
+# The try/catch is kept even though -Force fixes the known cause: falling
+# back to "run the check" is still the right behaviour for any other
+# unreadable-marker case, and this code runs before $logFile is being
+# written to, where an unhandled error would go to the terminal and never
+# reach download.log at all.
 try {
     if (Test-Path $updateThrottleMarker) {
-        $markerItem = Get-Item $updateThrottleMarker -ErrorAction Stop
+        $markerItem = Get-Item $updateThrottleMarker -Force -ErrorAction Stop
         $age = (Get-Date) - $markerItem.LastWriteTime
         if ($age.TotalHours -lt $updateThrottleHours) { $needsDependencyCheck = $false }
     }

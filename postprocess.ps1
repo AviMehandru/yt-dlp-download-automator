@@ -456,6 +456,29 @@ try {
     }
 
     # --- Every file + hash under the video folder ---
+    # video_postprocessing.log is deliberately EXCLUDED, and this fixes a
+    # real defect rather than being a stylistic choice. That file is this
+    # script's own live log: hashing it here captures its contents as of
+    # this moment, and then the Log calls for the remaining six steps
+    # (checksums written, manifest written, manifests updated, Channel Info,
+    # Final Video sync, "Post-processing complete") append to it. Its
+    # recorded hash was therefore guaranteed stale before the script even
+    # exited -- every video ever produced had exactly one entry in
+    # checksums.sha256 that could never verify. Confirmed with
+    # `sha256sum -c`: 9 of 10 OK, video_postprocessing.log FAILED.
+    #
+    # That matters more than one wrong line. A checksum manifest that always
+    # reports a failure teaches you to ignore its failures, which is the one
+    # thing an integrity file must never do -- and it would mask a genuine
+    # bit-rot or truncation finding among the noise. archive-viewer.py's own
+    # default_cache_dir() takes pains to stay outside the archive for exactly
+    # this reason, so the intent that these checksums actually verify is
+    # already established elsewhere in the project.
+    #
+    # video_complete.log is NOT excluded: it is written once, in full,
+    # earlier in this script and never appended to again, so its hash is
+    # stable. The exclusion is specifically the file still being written.
+    $selfLogRelPath = "Logs/video_postprocessing.log"
     $allFiles = Get-ChildItem -Path $videoDir -Recurse -File
     $fileHashes = [ordered]@{}
     $fileList = @()
@@ -469,6 +492,7 @@ try {
         # choice: Windows accepts it everywhere as a path separator, so a
         # value read back from the manifest still resolves natively there.
         $rel = $f.FullName.Substring($videoDir.Length + 1).Replace([System.IO.Path]::DirectorySeparatorChar, '/')
+        if ($rel -eq $selfLogRelPath) { continue }
         $fileList += $rel
         $hash = (Get-FileHash -Path $f.FullName -Algorithm SHA256).Hash
         $fileHashes[$rel] = $hash
@@ -596,8 +620,29 @@ try {
             $throttleMarker = Join-Path $channelInfoDir ".last_refresh"
             $throttleHours = 6
             $needsRefresh = $true
+            # -Force is REQUIRED here, and its absence was a real bug.
+            # PowerShell maps the Unix "leading dot means hidden" convention
+            # onto the Hidden file attribute, and Get-Item without -Force
+            # refuses to return a hidden item -- it throws "Could not find
+            # item", even though Test-Path on the same path just returned
+            # true. Every marker file in this pipeline is dot-prefixed, so
+            # this hits all of them on Linux and macOS. It does NOT hit
+            # Windows, where a leading dot carries no meaning, which is why
+            # it survived unnoticed in a Windows-first codebase.
+            #
+            # The consequence here was worse than a missed optimization.
+            # $ErrorActionPreference is "Stop" for this script, so the throw
+            # escaped to this block's catch, meaning that from the moment
+            # .last_refresh first existed, the Channel Info refresh was
+            # never throttled AND never ran -- every subsequent video logged
+            # "Channel Info refresh failed" and the marker was never
+            # rewritten. Channel avatars, banners and descriptions silently
+            # stopped being updated after the first video in each channel.
+            # Only the read side is affected: Set-Content writes to a hidden
+            # file (and creates one) perfectly well, which is why the marker
+            # still appeared to be maintained.
             if (Test-Path $throttleMarker) {
-                $age = (Get-Date) - (Get-Item $throttleMarker).LastWriteTime
+                $age = (Get-Date) - (Get-Item $throttleMarker -Force).LastWriteTime
                 if ($age.TotalHours -lt $throttleHours) { $needsRefresh = $false }
             }
 

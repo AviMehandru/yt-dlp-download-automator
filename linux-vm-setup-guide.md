@@ -1,6 +1,11 @@
 # Setting Up the yt-dlp Archival Pipeline on a Fresh Linux VM
 
-> **Shortcut:** `setup.sh` automates every step below (1 through 11) in one run. Run `chmod +x setup.sh && ./setup.sh`. It's idempotent -- safe to re-run if you want to retry a step that needed manual attention. It also does one thing with no manual equivalent below: it downloads the five project files it needs (`linux-ytdl`, `linux-run_ytdlp.ps1`, `linux-postprocess.ps1`, `linux-yt-dlp.conf`, `archive-viewer.py`) straight from GitHub into a scratch folder, then deletes that folder once they're copied into place -- unnecessary when you already have the files in front of you, which is the case if you're following these steps by hand. If any of those files are already sitting next to `setup.sh`, it uses those and doesn't download over them, so running it from inside a clone of this repo keeps your local edits. Steps 12 and 13 (the first test run, and opening the viewer) are yours to do either way. It does **not** hard-abort on a failed non-critical step (an earlier version did, which is what caused `ytdl` not to get installed automatically the first time around -- see the note in Step 7 below); instead it prints a summary of anything that needs a manual look at the very end. The manual steps below are still here for reference, or if you want to run things by hand.
+> **On macOS or Windows instead?** See [`mac-setup-guide.md`](mac-setup-guide.md)
+> or [`windows-setup-guide.md`](windows-setup-guide.md). The pipeline scripts
+> themselves are identical on all three platforms — only the installation
+> differs. This guide is specifically the Ubuntu/VMware-guest path.
+
+> **Shortcut:** `setup.sh` automates every step below (1 through 11) in one run. Run `chmod +x setup.sh && ./setup.sh`. It's idempotent -- safe to re-run if you want to retry a step that needed manual attention. It also does one thing with no manual equivalent below: it downloads the five project files it needs (`ytdl`, `run_ytdlp.ps1`, `postprocess.ps1`, `yt-dlp.conf`, `archive-viewer.py`) straight from GitHub into a scratch folder, then deletes that folder once they're copied into place -- unnecessary when you already have the files in front of you, which is the case if you're following these steps by hand. If any of those files are already sitting next to `setup.sh`, it uses those and doesn't download over them, so running it from inside a clone of this repo keeps your local edits. Steps 12 and 13 (the first test run, and opening the viewer) are yours to do either way. It does **not** hard-abort on a failed non-critical step (an earlier version did, which is what caused `ytdl` not to get installed automatically the first time around -- see the note in Step 7 below); instead it prints a summary of anything that needs a manual look at the very end. The manual steps below are still here for reference, or if you want to run things by hand.
 >
 > **It used to `git clone` the whole repo here and no longer does.** To be clear about why, since the obvious guess is wrong: it was not for disk space. That clone was scratch and got deleted a few steps later, so it cost roughly 400 KB transiently against an archive measured in gigabytes. The actual reasons are that this was the only thing in the entire project that ever needed `git`, that a plain HTTPS GET of five known filenames doesn't care whether the repo is public, private, or reachable over SSH, and that it has fewer ways to fail on a fresh VM. `git` is still installed in Step 2 and still checked in Step 11 -- you want it on this VM to work on the project; the pipeline just doesn't depend on it any more.
 
@@ -322,12 +327,12 @@ later wipe doesn't require redoing this step by hand.)
 ## Step 10: Place the project files and put `ytdl` / `ytdl-view` on your `PATH`
 
 ```bash
-cp linux-run_ytdlp.ps1   "$HOME/yt-dlp/scripts/run_ytdlp.ps1"
-cp linux-postprocess.ps1 "$HOME/yt-dlp/scripts/postprocess.ps1"
-cp linux-yt-dlp.conf     "$HOME/yt-dlp/configs/yt-dlp.conf"
-cp archive-viewer.py     "$HOME/yt-dlp/scripts/archive-viewer.py"
+cp run_ytdlp.ps1    "$HOME/yt-dlp/scripts/run_ytdlp.ps1"
+cp postprocess.ps1  "$HOME/yt-dlp/scripts/postprocess.ps1"
+cp yt-dlp.conf      "$HOME/yt-dlp/configs/yt-dlp.conf"
+cp archive-viewer.py "$HOME/yt-dlp/scripts/archive-viewer.py"
 mkdir -p "$HOME/.local/bin"
-cp linux-ytdl "$HOME/.local/bin/ytdl"
+cp ytdl "$HOME/.local/bin/ytdl"
 chmod +x "$HOME/.local/bin/ytdl" "$HOME/yt-dlp/scripts/archive-viewer.py"
 ```
 
