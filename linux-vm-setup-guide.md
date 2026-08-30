@@ -1,6 +1,8 @@
 # Setting Up the yt-dlp Archival Pipeline on a Fresh Linux VM
 
-> **Shortcut:** `setup.sh` (attached alongside the four pipeline files) automates every step below (1 through 11) in one run. Place it in the same folder as `linux-ytdl`, `linux-run_ytdlp.ps1`, `linux-postprocess.ps1`, and `linux-yt-dlp.conf`, then run `chmod +x setup.sh && ./setup.sh`. It's idempotent -- safe to re-run if you want to retry a step that needed manual attention. It also does one thing with no manual equivalent below: it clones this repo into a scratch folder to source the four pipeline files from, then deletes that clone once they're copied into place -- unnecessary when you already have the files in front of you, which is the case if you're following these steps by hand. Step 12 (the first test run) is yours to do either way. It does **not** hard-abort on a failed non-critical step (an earlier version did, which is what caused `ytdl` not to get installed automatically the first time around -- see the note in Step 7 below); instead it prints a summary of anything that needs a manual look at the very end. The manual steps below are still here for reference, or if you want to run things by hand.
+> **Shortcut:** `setup.sh` automates every step below (1 through 11) in one run. Run `chmod +x setup.sh && ./setup.sh`. It's idempotent -- safe to re-run if you want to retry a step that needed manual attention. It also does one thing with no manual equivalent below: it downloads the five project files it needs (`linux-ytdl`, `linux-run_ytdlp.ps1`, `linux-postprocess.ps1`, `linux-yt-dlp.conf`, `archive-viewer.py`) straight from GitHub into a scratch folder, then deletes that folder once they're copied into place -- unnecessary when you already have the files in front of you, which is the case if you're following these steps by hand. If any of those files are already sitting next to `setup.sh`, it uses those and doesn't download over them, so running it from inside a clone of this repo keeps your local edits. Steps 12 and 13 (the first test run, and opening the viewer) are yours to do either way. It does **not** hard-abort on a failed non-critical step (an earlier version did, which is what caused `ytdl` not to get installed automatically the first time around -- see the note in Step 7 below); instead it prints a summary of anything that needs a manual look at the very end. The manual steps below are still here for reference, or if you want to run things by hand.
+>
+> **It used to `git clone` the whole repo here and no longer does.** To be clear about why, since the obvious guess is wrong: it was not for disk space. That clone was scratch and got deleted a few steps later, so it cost roughly 400 KB transiently against an archive measured in gigabytes. The actual reasons are that this was the only thing in the entire project that ever needed `git`, that a plain HTTPS GET of five known filenames doesn't care whether the repo is public, private, or reachable over SSH, and that it has fewer ways to fail on a fresh VM. `git` is still installed in Step 2 and still checked in Step 11 -- you want it on this VM to work on the project; the pipeline just doesn't depend on it any more.
 
 As of this version, `setup.sh` and the pipeline files are also fully
 **username- and path-independent** -- nothing below needs any
@@ -27,7 +29,14 @@ Verify:
 ```bash
 ffmpeg -version
 ffprobe -version
+python3 --version
 ```
+
+`python3` is not in the install line above because Ubuntu always ships it and
+`python3-pip` depends on it anyway. It is listed here because the archive
+viewer (Step 10) needs it, and nothing else in the pipeline does — if that
+line fails, `sudo apt install -y python3` and everything else still works in
+the meantime.
 
 ---
 
@@ -212,7 +221,12 @@ the above first.
 
 This is optional for the pipeline itself — nothing in the scripts requires
 it — but it's a convenient way to pull finished archives off the VM, or
-drop in the four pipeline files from the host instead of re-typing them.
+drop in the project files from the host instead of re-typing them.
+
+It also makes the second half of Step 13 possible: with the archive visible
+on the host, you can run the viewer **on the host** against the mounted
+share instead of inside the VM, which is usually the nicer place to watch
+things.
 
 ---
 
@@ -305,16 +319,35 @@ later wipe doesn't require redoing this step by hand.)
 
 ---
 
-## Step 10: Place the four pipeline files and put `ytdl` on your `PATH`
+## Step 10: Place the project files and put `ytdl` / `ytdl-view` on your `PATH`
 
 ```bash
 cp linux-run_ytdlp.ps1   "$HOME/yt-dlp/scripts/run_ytdlp.ps1"
 cp linux-postprocess.ps1 "$HOME/yt-dlp/scripts/postprocess.ps1"
 cp linux-yt-dlp.conf     "$HOME/yt-dlp/configs/yt-dlp.conf"
+cp archive-viewer.py     "$HOME/yt-dlp/scripts/archive-viewer.py"
 mkdir -p "$HOME/.local/bin"
 cp linux-ytdl "$HOME/.local/bin/ytdl"
-chmod +x "$HOME/.local/bin/ytdl"
+chmod +x "$HOME/.local/bin/ytdl" "$HOME/yt-dlp/scripts/archive-viewer.py"
 ```
+
+`archive-viewer.py` goes in `scripts/` rather than on your `PATH` because it
+is a program, not a command. The command is a one-line launcher, which
+`setup.sh` generates rather than shipping as a repo file — by hand it is:
+
+```bash
+cat > "$HOME/.local/bin/ytdl-view" <<'EOF'
+#!/usr/bin/env bash
+exec python3 "$HOME/yt-dlp/scripts/archive-viewer.py" "$@"
+EOF
+chmod +x "$HOME/.local/bin/ytdl-view"
+```
+
+Note this file has no `linux-` prefix, unlike the four above. That's
+deliberate: it's pure Python standard library with no OS-specific anything,
+so the exact same file runs on the Windows/macOS host against a mounted
+archive. Nothing to install for it beyond `python3` itself — no pip, no
+virtualenv.
 
 Ubuntu usually adds `~/.local/bin` to `PATH` automatically for login shells,
 but confirm it's actually there:
@@ -337,12 +370,20 @@ ffmpeg -version | head -n 1
 pwsh --version
 "$HOME/.local/bin/deno" --version | head -n 1
 git --version
+python3 --version
 command -v ytdl
+command -v ytdl-view
+PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile "$HOME/yt-dlp/scripts/archive-viewer.py" && echo "viewer: OK"
 head -n 1 "$HOME/yt-dlp/configs/yt-dlp.conf"
 ```
 
 All of these should resolve without error, and the last command should
 print the current `CONFIG_VERSION` line.
+
+The `py_compile` line parses the viewer without running it — it is there to
+catch a truncated or corrupted copy, which a plain `cp` has no way to
+notice. `PYTHONPYCACHEPREFIX=/tmp` keeps the resulting `.pyc` out of
+`scripts/`.
 
 `yt-dlp` and `deno` are checked **by full path** on purpose. Both live in
 `$HOME/.local/bin`, which Step 10 may have only just appended to
@@ -388,13 +429,77 @@ Watch for:
 
 ---
 
+## Step 13: Read what you just archived
+
+The pipeline saves far more than a media player can show you — the whole
+comment thread most of all. `ytdl-view` serves the archive as a local web
+page: video with the subtitle tracks attached, the full threaded comment
+section (sortable, searchable, with in-comment timestamps that seek the
+player), a clickable transcript, the description and chapters as seek links,
+every metadata file, and a browser for every file in the folder.
+
+```bash
+ytdl-view
+```
+
+That auto-detects `$HOME/yt-dlp`, prints a URL, and opens it. If you archived
+somewhere else, point it there:
+
+```bash
+ytdl-view --root "/mnt/hgfs/yt-dlp-share/archive"
+```
+
+Useful additions:
+
+```bash
+ytdl-view --allow-open-local     # let the page hand a file to mpv/vlc (Step 8)
+ytdl-view --rescan               # ignore the cached index, re-read every info.json
+ytdl-view --help                 # everything else
+```
+
+**On the host instead of in the VM.** The viewer only reads the archive, and
+it is plain Python with no dependencies, so if you set up the shared folder
+in Step 7 you can copy `archive-viewer.py` to the Windows/macOS host and run
+it there against the mounted archive:
+
+```bash
+python3 archive-viewer.py --root "/Volumes/yt-dlp-share/archive" --allow-open-local
+```
+
+Three things worth knowing before you use it:
+
+- **It never writes to the archive.** Its index, the split-out comment files,
+  and any remuxed playback copies live in `~/.cache/ytdlp-archive-viewer`
+  (`~/Library/Caches/...` on macOS, `%LOCALAPPDATA%\...` on Windows). This
+  matters because `postprocess.ps1` writes a `checksums.sha256` covering
+  every file in a video folder — derived files dropped in there would make
+  that stop verifying. The cache is disposable; delete it any time.
+- **Some videos show a one-click "prepare" step before playing.** No browser
+  plays Matroska. When the streams inside are VP9/AV1 + Opus the `.mkv` is
+  byte-compatible with WebM and plays straight from the archive with no copy
+  at all — that's most of what this pipeline pulls. Otherwise ffmpeg copies
+  the existing video and audio into an MP4 (`-c copy`, nothing re-encoded,
+  usually seconds) in the cache. A genuine re-encode is only ever offered
+  explicitly, and `--no-transcode` removes even the offer.
+- **`--host 0.0.0.0` has no authentication of any kind.** It's how you watch
+  on a phone or TV, and it exposes every file in the archive to anything that
+  can reach the port. Fine on a home LAN, a bad idea anywhere else — which is
+  why the default binds to this machine only.
+
+If a video's comment tab is empty but the count on the card says otherwise,
+the comments pass failed at download time rather than the viewer failing to
+read them: open the **Files** tab and read `video_postprocessing.log`.
+
+---
+
 ## Quick reference: what lives where after setup
 
 ```
 $HOME/yt-dlp/                      (install root -- always here, regardless of -DataRoot)
 ├── scripts/
 │   ├── run_ytdlp.ps1
-│   └── postprocess.ps1
+│   ├── postprocess.ps1
+│   └── archive-viewer.py  (read-only consumer of the archive; not part of a download)
 └── configs/
     └── yt-dlp.conf
 
@@ -408,9 +513,14 @@ $HOME/yt-dlp/  <or a custom -DataRoot>
     └── Final Video/
 
 $HOME/.local/bin/
-├── ytdl                  (entry point, on PATH)
+├── ytdl                  (download entry point, on PATH)
+├── ytdl-view             (viewer launcher, on PATH -- generated by setup.sh, not copied)
 ├── yt-dlp                (standalone binary -- here, not /usr/local/bin, so -U can self-update)
 └── deno                  (exact path run_ytdlp.ps1 passes via --js-runtimes)
+
+$HOME/.cache/ytdlp-archive-viewer/   (viewer's own derived files -- deliberately NOT
+                                      inside the archive, so checksums.sha256 keeps
+                                      verifying; safe to delete at any time)
 
 /mnt/hgfs/<share-name>/   (VMware shared folder, host <-> guest)
 ```

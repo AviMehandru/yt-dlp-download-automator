@@ -7,11 +7,22 @@ It is a single Python 3 file with **no dependencies at all** — no pip, no venv
 packaging step, matching the rest of this project. It starts a small web server on
 your own machine and serves the archive as a browsable library.
 
+`setup.sh` installs it to `~/yt-dlp/scripts/archive-viewer.py` and generates a
+`ytdl-view` launcher on your `PATH`, so on a machine set up by the installer:
+
+```bash
+ytdl-view
+```
+
+Anywhere else — including the Windows/macOS host reading the archive over a shared
+folder — run the file directly; nothing needs installing beyond `python3` itself:
+
 ```bash
 python3 archive-viewer.py
 ```
 
-That auto-detects `~/yt-dlp`, prints a URL, and opens it. Everything else is optional.
+Either way that auto-detects `~/yt-dlp`, prints a URL, and opens it. Everything else
+is optional, and every flag below works identically through `ytdl-view`.
 
 ## What each video page gives you
 
@@ -104,6 +115,9 @@ The viewer only needs to *read* the folder, so either machine works:
 python3 archive-viewer.py --root "/Volumes/Media/yt-dlp" --allow-open-local
 ```
 
+Copy the single `.py` file over and that is the whole install — there is deliberately
+nothing else to set up on the host side.
+
 ffmpeg is only needed for the container-swap path and for reading stream details. On a
 Mac with no ffmpeg installed, everything else — library, comments, transcript,
 metadata, downloads — still works; the viewer says as much on startup instead of
@@ -115,6 +129,17 @@ That serves to every device on your network **with no authentication of any kind
 it exposes every file in the archive to anyone who can reach the port. It is genuinely
 useful for watching on a phone or TV on a home LAN, and genuinely a bad idea anywhere
 else. It is not the default for that reason.
+
+## Installation
+
+`setup.sh` handles this on the VM: Step 7 downloads `archive-viewer.py` alongside the
+four pipeline files, Step 11 copies it into `~/yt-dlp/scripts/` and writes the
+`ytdl-view` launcher, and Step 12 compiles it as a check that the download was not
+truncated. By hand it is two commands — see Step 10 of `linux-vm-setup-guide.md`.
+
+The viewer is installed to `scripts/` rather than onto your `PATH` because it is a
+program, not a command; `ytdl-view` is the command. It carries no `linux-` prefix,
+unlike the pipeline files, because there is nothing OS-specific in it.
 
 ## Verification status
 

@@ -20,8 +20,24 @@
 DATA_ROOT="${HOME}/yt-dlp"
 LOCAL_BIN="${HOME}/.local/bin"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_URL="https://github.com/AviMehandru/yt-dlp-download-automator.git"
-REPO_DIR="${SCRIPT_DIR}/YT-DLP Installation Files"
+# Raw-file base rather than a clone URL -- see the long comment at Step 7
+# for why this fetches individual files instead of cloning the repo.
+# "main" is this repo's default branch; if that ever changes, change it here.
+RAW_BASE="https://raw.githubusercontent.com/AviMehandru/yt-dlp-download-automator/main"
+DOWNLOAD_DIR="${SCRIPT_DIR}/YT-DLP Installation Files"
+# The exact set of files this installer needs. Everything else in the repo
+# (docs, LICENSE, SECURITY.md, CREDITS.md) is not needed to run anything, so
+# it is never fetched. Keep this list in sync with the copy_file calls in
+# Step 11 -- a file downloaded but never copied is dead weight, and a file
+# copied but never downloaded only works when it happens to sit next to
+# setup.sh already.
+PROJECT_FILES=(
+    "linux-run_ytdlp.ps1"
+    "linux-postprocess.ps1"
+    "linux-yt-dlp.conf"
+    "linux-ytdl"
+    "archive-viewer.py"
+)
 WARNINGS=()
 
 # --- Console log capture ---
@@ -57,10 +73,10 @@ echo "Logging full console output to: ${LOG_FILE}"
 # once per top-level step (11 total, matching the "Step N/11" labels this
 # script has always printed), regardless of how long that step's actual
 # work takes. That's a deliberate simplification -- the individual
-# installers/downloads below (apt, curl, yt-dlp -U, deno's installer, git
-# clone) already print their own real progress bars for their own work,
-# so this one only needs to answer "how far through the whole script am
-# I", not duplicate byte-level progress that's already visible.
+# installers/downloads below (apt, curl, yt-dlp -U, deno's installer)
+# already print their own real progress bars for their own work, so this
+# one only needs to answer "how far through the whole script am I", not
+# duplicate byte-level progress that's already visible.
 # TOTAL_STEPS must match the number of log() calls below (currently 12) --
 # if a step is ever added or removed, update this constant in the same
 # commit, or the bar will finish early/late relative to the actual work.
@@ -189,27 +205,72 @@ fi
 # this path itself via --js-runtimes, not read from PATH) -- if you ever
 # install deno somewhere else, that line needs updating too.
 
-# --- Step 7: clone the project repo ---
+# --- Step 7: fetch the project files ---
 # Convenience step: pulls the actual project files down automatically so
-# Step 10 below can find them without you having to place them by hand.
-# ASSUMPTION: this expects the repo to contain files named the same way
-# they've been named throughout this project (linux-run_ytdlp.ps1,
-# linux-postprocess.ps1, linux-yt-dlp.conf, linux-ytdl) either at the repo
-# root or in a "linux" subfolder -- Step 10 checks both. If your repo's
-# actual layout differs, this clone still succeeds (it's just a git
-# clone), but Step 10's automatic file-matching may not find them --
-# check the warnings at the end if so.
-log "Cloning project repository"
-if [ -d "$REPO_DIR/.git" ]; then
-    echo "Repository already cloned at '${REPO_DIR}' -- pulling latest instead."
-    if ! git -C "$REPO_DIR" pull; then
-        warn "git pull failed in '${REPO_DIR}'. Check it manually if you expect updates from the repo."
+# Step 11 below can find them without you having to place them by hand.
+#
+# WHY THIS FETCHES INDIVIDUAL FILES INSTEAD OF CLONING (changed from an
+# earlier `git clone` of the whole repo): the honest answer is NOT disk
+# space. The clone was already scratch -- deleted a few steps below once
+# the files were copied into place -- so it cost roughly 400 KB
+# transiently against an archive measured in gigabytes, which is nothing.
+# The real reasons are that this is the only thing in the entire project
+# that ever needed git (nothing in ytdl, run_ytdlp.ps1 or postprocess.ps1
+# touches it), that it no longer matters whether the repo is public,
+# private, or reachable over SSH vs HTTPS, and that a plain HTTPS GET of
+# five known filenames has far fewer ways to fail on a fresh VM than a
+# clone does. git is still installed in Step 2 and still reported in the
+# Step 12 verification, because you will want it on this VM to edit the
+# project -- the pipeline just no longer *depends* on it.
+#
+# Files already sitting next to setup.sh are used as-is and never
+# downloaded over. That is deliberate and load-bearing for the
+# edit-then-reinstall loop: if you cloned the repo and are running
+# ./setup.sh from inside it, your local edits win, and nothing is fetched
+# from GitHub at all.
+log "Downloading project files"
+mkdir -p "$DOWNLOAD_DIR"
+
+# curl first (already required by the Deno install in Step 6), wget as the
+# fallback -- Step 2 installs both, but a minimal image that lost one of
+# them should not take the whole setup down.
+download_to() {
+    local url="$1" dest="$2"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --retry 3 --retry-delay 2 -o "$dest" "$url" && return 0
     fi
-else
-    if ! git clone "$REPO_URL" "$REPO_DIR"; then
-        warn "git clone of $REPO_URL failed. If the repo is private, you'll need to authenticate (e.g. gh auth login, or an SSH remote) and clone manually into: $REPO_DIR"
+    if command -v wget >/dev/null 2>&1; then
+        wget -q -t 3 -O "$dest" "$url" && return 0
     fi
-fi
+    return 1
+}
+
+for project_file in "${PROJECT_FILES[@]}"; do
+    if [ -f "${SCRIPT_DIR}/${project_file}" ]; then
+        echo "Using local '${project_file}' from ${SCRIPT_DIR} -- not downloading."
+        continue
+    fi
+    part="${DOWNLOAD_DIR}/${project_file}.part"
+    if download_to "${RAW_BASE}/${project_file}" "$part"; then
+        # curl -f / wget catch an HTTP *error status*, but not a proxy or
+        # captive portal that answers 200 with its own HTML page. None of
+        # these files is HTML, so a first line that looks like markup means
+        # something intercepted the request and the "download" is garbage.
+        if [ ! -s "$part" ]; then
+            rm -f "$part"
+            warn "Downloaded '${project_file}' was empty -- treating as a failed download. Fetch it manually from ${RAW_BASE}/${project_file} into ${DOWNLOAD_DIR}"
+        elif head -n 1 "$part" | grep -qiE '^\s*<(!doctype|html)'; then
+            rm -f "$part"
+            warn "'${project_file}' came back as an HTML page rather than the file itself -- something (a proxy, captive portal, or DNS interception) answered instead of GitHub. Check the VM's network, then re-run."
+        else
+            mv "$part" "${DOWNLOAD_DIR}/${project_file}"
+            echo "Downloaded ${project_file}"
+        fi
+    else
+        rm -f "$part"
+        warn "Could not download '${project_file}' from ${RAW_BASE}/${project_file}. Check network/DNS from inside the VM, or place the file next to setup.sh (${SCRIPT_DIR}) and re-run."
+    fi
+done
 
 # --- VMware guest detection (used by Step 8 below) ---
 # systemd-detect-virt is the primary check -- reliable on any systemd-based
@@ -364,19 +425,20 @@ mkdir -p "${DATA_ROOT}/Youtube Videos/_incomplete"
 mkdir -p "${DATA_ROOT}/Youtube Videos/Final Video"
 echo "Folder structure created."
 
-# --- Step 11: place the four pipeline files ---
+# --- Step 11: place the pipeline files and the archive viewer ---
 # Looks in three places, in order: next to setup.sh itself, inside the
-# cloned repo's root, and inside a "linux" subfolder of the cloned repo
-# (covering the most likely layouts without guessing further). Each file
-# is resolved and copied independently -- a missing one only warns about
-# itself and doesn't block the others.
+# download folder Step 7 filled, and inside a "linux" subfolder of it (the
+# last one is a leftover from when Step 7 cloned the whole repo -- kept
+# because it costs nothing and still resolves a hand-placed clone). Each
+# file is resolved and copied independently -- a missing one only warns
+# about itself and doesn't block the others.
 log "Installing pipeline files"
 copy_file() {
     local src="$1" dest="$2" label="$3"
     local candidates=(
         "${SCRIPT_DIR}/${src}"
-        "${REPO_DIR}/${src}"
-        "${REPO_DIR}/linux/${src}"
+        "${DOWNLOAD_DIR}/${src}"
+        "${DOWNLOAD_DIR}/linux/${src}"
     )
     for candidate in "${candidates[@]}"; do
         if [ -f "$candidate" ]; then
@@ -387,16 +449,58 @@ copy_file() {
     done
     warn "${src} not found in any of: ${candidates[*]} -- ${label} was NOT installed. Copy it to ${dest} manually."
 }
-# Snapshot the warning count right before these four copies -- compared
-# again below, after they've all run, to decide whether it's safe to
-# delete the cloned repo (see the cleanup block further down).
+# Snapshot the warning count right before these copies -- compared again
+# below, after they've all run, to decide whether it's safe to delete the
+# downloaded files (see the cleanup block further down).
 WARNINGS_BEFORE_INSTALL="${#WARNINGS[@]}"
-copy_file "linux-run_ytdlp.ps1"   "${DATA_ROOT}/scripts/run_ytdlp.ps1"   "run_ytdlp.ps1"
-copy_file "linux-postprocess.ps1" "${DATA_ROOT}/scripts/postprocess.ps1" "postprocess.ps1"
-copy_file "linux-yt-dlp.conf"     "${DATA_ROOT}/configs/yt-dlp.conf"     "yt-dlp.conf"
-copy_file "linux-ytdl"            "${LOCAL_BIN}/ytdl"                    "ytdl"
+copy_file "linux-run_ytdlp.ps1"   "${DATA_ROOT}/scripts/run_ytdlp.ps1"      "run_ytdlp.ps1"
+copy_file "linux-postprocess.ps1" "${DATA_ROOT}/scripts/postprocess.ps1"    "postprocess.ps1"
+copy_file "linux-yt-dlp.conf"     "${DATA_ROOT}/configs/yt-dlp.conf"        "yt-dlp.conf"
+copy_file "linux-ytdl"            "${LOCAL_BIN}/ytdl"                       "ytdl"
+# The viewer lives with the scripts rather than in ${LOCAL_BIN} because it is
+# a program, not a command -- ${LOCAL_BIN}/ytdl-view below is what you type.
+# It has no filename prefix because, unlike the four files above, it is not
+# OS-specific: the same file runs unmodified on Linux, macOS and Windows,
+# which matters here since the archive is often read from the host rather
+# than from inside this VM.
+copy_file "archive-viewer.py"     "${DATA_ROOT}/scripts/archive-viewer.py"  "archive-viewer.py"
 if [ -f "${LOCAL_BIN}/ytdl" ]; then
     chmod +x "${LOCAL_BIN}/ytdl"
+fi
+if [ -f "${DATA_ROOT}/scripts/archive-viewer.py" ]; then
+    chmod +x "${DATA_ROOT}/scripts/archive-viewer.py"
+fi
+
+# --- ytdl-view launcher ---
+# Written here rather than shipped as a repo file. Every other installed
+# file is a copy of a repo source, and this one deliberately is not: its
+# entire content is a single exec line, so a repo file would exist only to
+# be copied and would be one more thing to keep in sync. It hardcodes
+# ${DATA_ROOT}'s script path for the same reason linux-ytdl hardcodes
+# $HOME/yt-dlp/scripts -- the *install* root is fixed even when the *data*
+# root moves. A custom data root is handled at runtime instead:
+#     ytdl-view --root /mnt/hgfs/yt-dlp-share/archive
+# The heredoc delimiter is quoted so $HOME and "$@" are written literally
+# and expand when the launcher runs, not now.
+if [ -f "${DATA_ROOT}/scripts/archive-viewer.py" ]; then
+    cat > "${LOCAL_BIN}/ytdl-view" <<'YTDL_VIEW_LAUNCHER'
+#!/usr/bin/env bash
+# Generated by setup.sh -- thin launcher for archive-viewer.py.
+# All arguments pass straight through: --root, --port, --host,
+# --allow-open-local, --rescan, --help, and so on.
+exec python3 "$HOME/yt-dlp/scripts/archive-viewer.py" "$@"
+YTDL_VIEW_LAUNCHER
+    chmod +x "${LOCAL_BIN}/ytdl-view"
+    echo "Installed ytdl-view -> ${LOCAL_BIN}/ytdl-view (launches the archive viewer)"
+    # The viewer is pure standard library, so there is nothing to install for
+    # it -- but it does need python3 to exist. Ubuntu always ships it, and
+    # Step 2 installs python3-pip which depends on it, so this is a
+    # belt-and-braces check rather than an expected failure.
+    if ! command -v python3 >/dev/null 2>&1; then
+        warn "python3 was not found, so 'ytdl-view' will not run. Install it with: sudo apt install -y python3"
+    fi
+else
+    warn "archive-viewer.py was not installed, so the 'ytdl-view' launcher was skipped."
 fi
 
 if ! echo "$PATH" | tr ':' '\n' | grep -q "${LOCAL_BIN}"; then
@@ -404,27 +508,32 @@ if ! echo "$PATH" | tr ':' '\n' | grep -q "${LOCAL_BIN}"; then
     echo "Added ${LOCAL_BIN} to PATH in ~/.bashrc -- run 'source ~/.bashrc' or start a new shell before using 'ytdl'."
 fi
 
-# --- Clean up the cloned installation files now that they're copied ---
-# ${REPO_DIR} ("YT-DLP Installation Files") is scratch: it exists only to
-# source the four pipeline files above. Once those are safely sitting in
-# their real destinations (under ${DATA_ROOT} and ${LOCAL_BIN}), there's no
-# reason to leave a second copy of the whole repo sitting on disk.
+# --- Clean up the downloaded installation files now that they're copied ---
+# ${DOWNLOAD_DIR} ("YT-DLP Installation Files") is scratch: it exists only
+# to source the files above. Once those are safely sitting in their real
+# destinations (under ${DATA_ROOT} and ${LOCAL_BIN}), there's no reason to
+# leave a second copy on disk.
 #
 # Only deleted if every copy_file call above actually succeeded (checked
 # by comparing the warning count before/after that block, rather than
 # tracking each call's return value separately -- copy_file already
 # reports failures via warn(), so re-using that as the single source of
 # truth avoids keeping two parallel "did it work" mechanisms in sync). If
-# anything failed to install, the clone is deliberately left in place --
+# anything failed to install, the download is deliberately left in place --
 # it may be the only remaining copy of a file that never made it to its
 # destination, so deleting it here would destroy the one thing you'd need
 # to fix the problem by hand.
-if [ -d "$REPO_DIR" ]; then
+#
+# Note this never deletes anything you placed next to setup.sh yourself:
+# ${DOWNLOAD_DIR} is a subfolder Step 7 creates, and Step 7 skips
+# downloading anything already present beside setup.sh, so a repo you
+# cloned by hand is untouched by this.
+if [ -d "$DOWNLOAD_DIR" ]; then
     if [ "${#WARNINGS[@]}" -eq "$WARNINGS_BEFORE_INSTALL" ]; then
-        rm -rf "$REPO_DIR"
-        echo "Removed cloned installation files at '${REPO_DIR}' (already copied into place, no longer needed)."
+        rm -rf "$DOWNLOAD_DIR"
+        echo "Removed downloaded installation files at '${DOWNLOAD_DIR}' (already copied into place, no longer needed)."
     else
-        echo "Leaving '${REPO_DIR}' in place -- at least one pipeline file above failed to install from it (see the WARNING(s) further up). Once that's resolved and you've confirmed everything under ${DATA_ROOT}/scripts and ${DATA_ROOT}/configs is correct, it's safe to delete manually."
+        echo "Leaving '${DOWNLOAD_DIR}' in place -- at least one file above failed to install from it (see the WARNING(s) further up). Once that's resolved and you've confirmed everything under ${DATA_ROOT}/scripts and ${DATA_ROOT}/configs is correct, it's safe to delete manually."
     fi
 fi
 
@@ -445,7 +554,23 @@ echo "ffmpeg:  $(ffmpeg -version 2>/dev/null | head -n1 || echo 'NOT FOUND')"
 echo "pwsh:    $(pwsh --version 2>/dev/null || echo 'NOT FOUND')"
 echo "deno:    $(${LOCAL_BIN}/deno --version 2>/dev/null | head -n1 || echo 'NOT FOUND')"
 echo "git:     $(git --version 2>/dev/null || echo 'NOT FOUND')"
+# python3 is only needed by the archive viewer -- nothing in the download
+# pipeline itself touches it -- so a miss here is not a broken install.
+echo "python3: $(python3 --version 2>/dev/null || echo 'NOT FOUND (only the archive viewer needs it)')"
 echo "ytdl:    $(command -v ytdl || echo 'NOT FOUND (open a new shell if PATH was just updated)')"
+echo "ytdl-view: $(command -v ytdl-view || echo 'NOT FOUND (open a new shell if PATH was just updated)')"
+# Compiles the viewer without running it -- catches a truncated or corrupted
+# download that copy_file itself has no way to notice.
+if [ -f "${DATA_ROOT}/scripts/archive-viewer.py" ] && command -v python3 >/dev/null 2>&1; then
+    # PYTHONPYCACHEPREFIX keeps the resulting .pyc out of scripts/ -- this is
+    # a check, and it should not leave a __pycache__ folder behind in an
+    # install directory that otherwise holds exactly three known files.
+    if PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile "${DATA_ROOT}/scripts/archive-viewer.py" 2>/dev/null; then
+        echo "viewer:  archive-viewer.py installed and parses cleanly"
+    else
+        warn "archive-viewer.py is installed but does not compile -- the download may be truncated. Delete ${DATA_ROOT}/scripts/archive-viewer.py and re-run this script."
+    fi
+fi
 # Desktop-only, and only meaningful if Step 9 actually ran -- reported as
 # "skipped (no desktop)" rather than "NOT FOUND" on a headless install, so
 # a deliberate skip doesn't read as a failure in the summary.
@@ -474,3 +599,7 @@ else
 fi
 echo -e "\nFull console log saved to: ${LOG_FILE}"
 echo -e "\nTest with: ytdl \"https://www.youtube.com/watch?v=SOME_SHORT_VIDEO_ID\""
+echo -e "Then browse what you archived -- video, subtitles, transcript, metadata"
+echo -e "and the full comment thread -- with: ytdl-view"
+echo -e "  (add --root /path/to/archive if you downloaded to a custom data root,"
+echo -e "   and --allow-open-local to let the page hand files to mpv/vlc)"
