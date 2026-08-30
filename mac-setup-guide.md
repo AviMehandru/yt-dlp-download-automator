@@ -1,7 +1,8 @@
 # Setting Up the yt-dlp Archival Pipeline on macOS
 
-> **On Linux or Windows instead?** See [`linux-vm-setup-guide.md`](linux-vm-setup-guide.md)
-> or [`windows-setup-guide.md`](windows-setup-guide.md). The pipeline scripts
+> **On Linux or Windows instead?** See [`linux-setup-guide.md`](linux-setup-guide.md)
+> (bare metal), [`linux-vm-setup-guide.md`](linux-vm-setup-guide.md) (in a
+> VMware VM), or [`windows-setup-guide.md`](windows-setup-guide.md). The pipeline scripts
 > themselves are byte-identical on all three platforms — `run_ytdlp.ps1`,
 > `postprocess.ps1` and `yt-dlp.conf` are one shared set — so only the
 > installation differs.

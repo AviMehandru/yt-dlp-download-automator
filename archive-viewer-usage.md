@@ -132,10 +132,13 @@ else. It is not the default for that reason.
 
 ## Installation
 
-`setup.sh` handles this on the VM: Step 7 downloads `archive-viewer.py` alongside the
-four pipeline files, Step 11 copies it into `~/yt-dlp/scripts/` and writes the
-`ytdl-view` launcher, and Step 12 compiles it as a check that the download was not
-truncated. By hand it is two commands — see Step 10 of `linux-vm-setup-guide.md`.
+The installer handles this on every platform: Step 7 downloads `archive-viewer.py`
+alongside the pipeline files, Step 11 copies it into the install root's `scripts/`
+folder and writes the `ytdl-view` launcher, and Step 12 compiles it as a check that
+the download was not truncated. By hand it is two commands — see the "place the
+project files" step of whichever setup guide matches your machine
+(`linux-setup-guide.md`, `linux-vm-setup-guide.md`, `mac-setup-guide.md` or
+`windows-setup-guide.md`).
 
 The viewer is installed to `scripts/` rather than onto your `PATH` because it is a
 program, not a command; `ytdl-view` is the command. It carries no `linux-` prefix,
