@@ -1,6 +1,20 @@
 #!/usr/bin/env bash
-# Automated setup for the yt-dlp archival pipeline on a fresh Ubuntu VM.
-# Mirrors the manual setup guide step-for-step.
+# Automated setup for the yt-dlp archival pipeline on Linux (Ubuntu) and
+# macOS. Mirrors the manual setup guide step-for-step.
+#
+# ONE script for both Unix platforms rather than a separate mac-setup.sh.
+# The two genuinely differ in only three places -- which package manager
+# installs things, which yt-dlp release asset to download, and what
+# "desktop preview support" means -- and each of those is a small branch
+# below, marked with a PLATFORM comment. Everything else (the folder tree,
+# the file placement, the ytdl-view launcher, PATH wiring, verification) is
+# byte-for-byte identical, and keeping it in one file is what stops the
+# macOS half from quietly falling behind the Linux half the way the Windows
+# scripts previously did.
+#
+# Windows has its own installer, setup.ps1, since nothing here can run
+# there. It performs the same twelve steps with winget in place of
+# apt/brew.
 #
 # Deliberately does NOT use "set -e". Every external command that could
 # plausibly fail on some systems (a package temporarily unavailable, no
@@ -17,7 +31,19 @@
 #   chmod +x setup.sh
 #   ./setup.sh
 
-DATA_ROOT="${HOME}/yt-dlp"
+# --- PLATFORM detection ---
+# Done first, before anything else, since almost every step below reads it.
+# uname -s is the portable answer here and needs no external tooling.
+case "$(uname -s)" in
+    Darwin) PLATFORM="macos" ;;
+    Linux)  PLATFORM="linux" ;;
+    *)
+        echo "ERROR: unsupported platform '$(uname -s)'. This installer covers Linux and macOS; use setup.ps1 on Windows." >&2
+        exit 1
+        ;;
+esac
+
+DATA_ROOT="${YTDLP_INSTALL_ROOT:-${HOME}/yt-dlp}"
 LOCAL_BIN="${HOME}/.local/bin"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Raw-file base rather than a clone URL -- see the long comment at Step 7
@@ -31,11 +57,16 @@ DOWNLOAD_DIR="${SCRIPT_DIR}/YT-DLP Installation Files"
 # Step 11 -- a file downloaded but never copied is dead weight, and a file
 # copied but never downloaded only works when it happens to sit next to
 # setup.sh already.
+#
+# These names lost their "linux-" prefix when the Linux and Windows script
+# copies were merged into one cross-platform set: there is now a single
+# run_ytdlp.ps1 and a single postprocess.ps1 that both platforms (and
+# Windows) install unmodified.
 PROJECT_FILES=(
-    "linux-run_ytdlp.ps1"
-    "linux-postprocess.ps1"
-    "linux-yt-dlp.conf"
-    "linux-ytdl"
+    "run_ytdlp.ps1"
+    "postprocess.ps1"
+    "yt-dlp.conf"
+    "ytdl"
     "archive-viewer.py"
 )
 WARNINGS=()
@@ -43,17 +74,17 @@ WARNINGS=()
 # --- Console log capture ---
 # Saves a full, byte-for-byte copy of everything this script prints (both
 # the script's own echo/log/warn lines AND the raw output of every
-# external command it runs -- apt, curl, yt-dlp -U, the deno installer,
-# git, etc) to a timestamped file, while still showing it all on the
-# terminal live as normal. Uses the same "Archive Logs/Logs" directory
-# the rest of the pipeline already logs into (download.log,
+# external command it runs -- apt/brew, curl, yt-dlp -U, the deno
+# installer, git, etc) to a timestamped file, while still showing it all
+# on the terminal live as normal. Uses the same "Archive Logs/Logs"
+# directory the rest of the pipeline already logs into (download.log,
 # video_postprocessing.log), for one consistent place to look, rather
 # than inventing a separate logs location just for setup runs.
 #
 # This log dir is created here, standalone, rather than waiting for Step
-# 9 (which creates the full folder tree) -- setup needs somewhere to log
-# its own very first commands (apt update etc.), well before Step 9 runs.
-# Step 9's later `mkdir -p` of the same path is a harmless no-op once this
+# 10 (which creates the full folder tree) -- setup needs somewhere to log
+# its own very first commands (apt update etc.), well before Step 10 runs.
+# Step 10's later `mkdir -p` of the same path is a harmless no-op once this
 # has already created it.
 #
 # exec > >(tee -a "$LOG_FILE") 2>&1 replaces the script's own stdout/stderr
@@ -61,25 +92,33 @@ WARNINGS=()
 # which duplicates it to both the terminal (so you still watch it live,
 # including e.g. apt's own progress bars) and appends it to $LOG_FILE.
 # This needs bash's process-substitution support (>(...)), which is why
-# the shebang above is bash specifically, not /bin/sh.
+# the shebang above is bash specifically, not /bin/sh. macOS ships bash 3.2
+# as /bin/bash, which supports process substitution and everything else
+# used here -- the shebang is /usr/bin/env bash so a newer Homebrew bash is
+# preferred when present, but 3.2 is sufficient.
 LOG_DIR="${DATA_ROOT}/Archive Logs/Logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="${LOG_DIR}/setup_$(date +%Y%m%d_%H%M%S).log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 echo "Logging full console output to: ${LOG_FILE}"
+echo "Detected platform: ${PLATFORM}"
 
 # --- Overall progress bar ---
 # This is a step-counter bar, not a byte/percent-of-work bar: it advances
-# once per top-level step (11 total, matching the "Step N/11" labels this
-# script has always printed), regardless of how long that step's actual
-# work takes. That's a deliberate simplification -- the individual
-# installers/downloads below (apt, curl, yt-dlp -U, deno's installer)
-# already print their own real progress bars for their own work, so this
-# one only needs to answer "how far through the whole script am I", not
-# duplicate byte-level progress that's already visible.
+# once per top-level step (12 total, matching the "Step N/12" labels this
+# script prints), regardless of how long that step's actual work takes.
+# That's a deliberate simplification -- the individual installers/downloads
+# below (apt/brew, curl, yt-dlp -U, deno's installer) already print their
+# own real progress bars for their own work, so this one only needs to
+# answer "how far through the whole script am I", not duplicate byte-level
+# progress that's already visible.
 # TOTAL_STEPS must match the number of log() calls below (currently 12) --
 # if a step is ever added or removed, update this constant in the same
 # commit, or the bar will finish early/late relative to the actual work.
+# Note the step COUNT is the same on both platforms even though two of the
+# steps (VMware, desktop previews) do different or no work on macOS -- they
+# still run and still report, so the numbering matches between a Linux log
+# and a macOS log.
 TOTAL_STEPS=12
 CURRENT_STEP=0
 
@@ -98,13 +137,13 @@ draw_progress_bar() {
     printf 'Overall progress: [%s] %3d%%  (step %d/%d)\n' "$bar" "$pct" "$CURRENT_STEP" "$TOTAL_STEPS"
 }
 
-# log() now does double duty: it's still the per-step header (as before),
-# but it also owns the step counter -- every call advances the overall bar
-# by exactly one step. This keeps the bar's step count and the actual
-# "Step N/11" numbering impossible to drift apart from each other, since
-# there's only one place (this function) that increments anything, instead
-# of hand-typing "Step 3/11" etc. at each call site where it could get out
-# of sync if steps are ever reordered/added later.
+# log() does double duty: it's the per-step header, but it also owns the
+# step counter -- every call advances the overall bar by exactly one step.
+# This keeps the bar's step count and the actual "Step N/12" numbering
+# impossible to drift apart from each other, since there's only one place
+# (this function) that increments anything, instead of hand-typing
+# "Step 3/12" etc. at each call site where it could get out of sync if
+# steps are ever reordered/added later.
 log()  {
     CURRENT_STEP=$((CURRENT_STEP + 1))
     echo ""
@@ -117,15 +156,48 @@ mkdir -p "$LOCAL_BIN"
 
 # --- Step 1: update the system ---
 log "Updating system packages"
-if ! sudo apt update; then
-    warn "apt update failed -- package installs below may use a stale index. Run 'sudo apt update' manually and re-run this script."
+if [ "$PLATFORM" = "macos" ]; then
+    # PLATFORM: Homebrew instead of apt. Deliberately NOT auto-installing
+    # Homebrew if it's missing -- its installer needs sudo, modifies
+    # system-owned directories, and prompts for confirmation; running that
+    # silently from inside another script is exactly the kind of unattended
+    # privileged side effect this project avoids elsewhere (see the apt
+    # comment in run_ytdlp.ps1's dependency check). A clear warning with
+    # the command to run is more useful than a surprising install.
+    if ! command -v brew >/dev/null 2>&1; then
+        warn "Homebrew is not installed, so ffmpeg/pwsh/players below cannot be installed automatically. Install it first with: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\" -- then re-run this script. The folder-structure and file-placement steps further down will still run without it."
+    else
+        brew update || warn "brew update failed -- package installs below may use a stale index."
+        brew upgrade || warn "brew upgrade failed -- continuing anyway."
+    fi
+else
+    if ! sudo apt update; then
+        warn "apt update failed -- package installs below may use a stale index. Run 'sudo apt update' manually and re-run this script."
+    fi
+    sudo apt upgrade -y || warn "apt upgrade failed -- continuing anyway."
 fi
-sudo apt upgrade -y || warn "apt upgrade failed -- continuing anyway."
 
 # --- Step 2: base dependencies ---
 log "Installing ffmpeg, git, and base tools"
-if ! sudo apt install -y curl wget git ffmpeg ca-certificates apt-transport-https software-properties-common python3-pip; then
-    warn "Base package install failed. yt-dlp/ffmpeg/git may not work until you run: sudo apt install -y curl wget git ffmpeg ca-certificates apt-transport-https software-properties-common python3-pip"
+if [ "$PLATFORM" = "macos" ]; then
+    # PLATFORM: macOS already ships curl and (via the Xcode Command Line
+    # Tools) git and python3, so the list is much shorter than Ubuntu's --
+    # only ffmpeg and wget genuinely need installing. git is still listed
+    # so a Mac without the CLT installed gets a working one.
+    if command -v brew >/dev/null 2>&1; then
+        if ! brew install ffmpeg git wget; then
+            warn "Base package install failed. Retry with: brew install ffmpeg git wget"
+        fi
+    else
+        warn "Skipped base package install -- Homebrew is not available (see Step 1)."
+    fi
+    # ffprobe ships inside the same ffmpeg formula on macOS, same as the
+    # Ubuntu package, so there's nothing extra to install for
+    # postprocess.ps1's attachment-count probe.
+else
+    if ! sudo apt install -y curl wget git ffmpeg ca-certificates apt-transport-https software-properties-common python3-pip; then
+        warn "Base package install failed. yt-dlp/ffmpeg/git may not work until you run: sudo apt install -y curl wget git ffmpeg ca-certificates apt-transport-https software-properties-common python3-pip"
+    fi
 fi
 
 # --- Step 3: yt-dlp (standalone binary, so -U self-update actually works) ---
@@ -135,16 +207,38 @@ fi
 # temp file and renames over the old one), and /usr/local/bin is root-owned
 # regardless of who owns the file inside it. Installing into a directory
 # the user already owns outright sidesteps the whole problem rather than
-# patching around it.
+# patching around it. Same reasoning applies on macOS, where
+# /usr/local/bin (Intel) or /opt/homebrew/bin (Apple silicon) is owned by
+# Homebrew rather than by the pipeline.
 log "Installing yt-dlp"
-if command -v yt-dlp >/dev/null 2>&1 && [ "$(command -v yt-dlp)" = "${LOCAL_BIN}/yt-dlp" ]; then
-    echo "yt-dlp already present at ${LOCAL_BIN}/yt-dlp ($(yt-dlp --version)) -- skipping install, run 'yt-dlp -U' to update."
+# PLATFORM: different release asset per OS. The plain "yt-dlp" asset is the
+# Linux binary; macOS needs "yt-dlp_macos", which is a universal binary
+# covering both Apple silicon and Intel, so no arch branch is needed beyond
+# this one filename.
+if [ "$PLATFORM" = "macos" ]; then
+    YTDLP_ASSET="yt-dlp_macos"
 else
-    if curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o "${LOCAL_BIN}/yt-dlp"; then
+    YTDLP_ASSET="yt-dlp"
+fi
+if [ -x "${LOCAL_BIN}/yt-dlp" ]; then
+    echo "yt-dlp already present at ${LOCAL_BIN}/yt-dlp ($(${LOCAL_BIN}/yt-dlp --version 2>/dev/null)) -- skipping install, run 'yt-dlp -U' to update."
+else
+    if curl -L "https://github.com/yt-dlp/yt-dlp/releases/latest/download/${YTDLP_ASSET}" -o "${LOCAL_BIN}/yt-dlp"; then
         chmod a+rx "${LOCAL_BIN}/yt-dlp"
-        echo "Installed yt-dlp to ${LOCAL_BIN}/yt-dlp."
+        echo "Installed yt-dlp to ${LOCAL_BIN}/yt-dlp (from asset ${YTDLP_ASSET})."
+        if [ "$PLATFORM" = "macos" ]; then
+            # PLATFORM: Gatekeeper quarantines anything downloaded with a
+            # com.apple.quarantine attribute, and a quarantined binary run
+            # from the terminal fails with a "cannot be opened because the
+            # developer cannot be verified" dialog rather than a normal
+            # error -- which looks like a broken download rather than a
+            # security prompt. Stripping the attribute on a binary we just
+            # fetched ourselves over HTTPS from a known URL is the same
+            # trust decision as choosing to install it at all.
+            xattr -d com.apple.quarantine "${LOCAL_BIN}/yt-dlp" 2>/dev/null || true
+        fi
     else
-        warn "yt-dlp download failed. Retry manually: curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ${LOCAL_BIN}/yt-dlp && chmod a+rx ${LOCAL_BIN}/yt-dlp"
+        warn "yt-dlp download failed. Retry manually: curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/${YTDLP_ASSET} -o ${LOCAL_BIN}/yt-dlp && chmod a+rx ${LOCAL_BIN}/yt-dlp"
     fi
 fi
 
@@ -152,6 +246,17 @@ fi
 log "Installing PowerShell 7 (pwsh)"
 if command -v pwsh >/dev/null 2>&1; then
     echo "pwsh already present ($(pwsh --version)) -- skipping."
+elif [ "$PLATFORM" = "macos" ]; then
+    # PLATFORM: pwsh ships as a Homebrew CASK on macOS (it's a signed pkg
+    # from Microsoft), not a formula -- "brew install powershell" without
+    # --cask fails with "No available formula".
+    if command -v brew >/dev/null 2>&1; then
+        if ! brew install --cask powershell; then
+            warn "pwsh install failed via Homebrew. Install manually before using the pipeline -- nothing else here can run without it. Retry with: brew install --cask powershell"
+        fi
+    else
+        warn "Cannot install pwsh -- Homebrew is not available (see Step 1). Nothing in this pipeline can run without pwsh."
+    fi
 else
     # As of this writing, Microsoft has not published apt packages for
     # Ubuntu 26.04 (open, unresolved gap on their end). Try apt first anyway
@@ -176,8 +281,15 @@ fi
 
 # --- Step 5: curl_cffi (fixes the "no impersonate target" warning) ---
 log "Installing curl_cffi (browser-impersonation support for yt-dlp)"
-if ! python3 -m pip install -U "curl_cffi>=0.10" --break-system-packages; then
-    warn "curl_cffi install failed. yt-dlp will keep warning about missing impersonation targets until you retry: python3 -m pip install -U \"curl_cffi>=0.10\" --break-system-packages"
+# --break-system-packages is what lets pip write into an externally-managed
+# environment (PEP 668), which both modern Ubuntu and Homebrew's python
+# are. Falling back to --user covers an older pip that doesn't recognize
+# the flag at all, where --user achieves the same "don't touch the system
+# site-packages" outcome by a different route.
+if ! python3 -m pip install -U "curl_cffi>=0.10" --break-system-packages 2>/dev/null; then
+    if ! python3 -m pip install -U --user "curl_cffi>=0.10"; then
+        warn "curl_cffi install failed. yt-dlp will keep warning about missing impersonation targets until you retry: python3 -m pip install -U \"curl_cffi>=0.10\" --break-system-packages"
+    fi
 fi
 
 # --- Step 6: Deno (JS runtime -- YouTube now requires solving a JS ---
@@ -188,11 +300,15 @@ log "Installing Deno (JavaScript runtime required for current YouTube extraction
 if [ -x "${LOCAL_BIN}/deno" ]; then
     echo "deno already present at ${LOCAL_BIN}/deno ($(${LOCAL_BIN}/deno --version | head -n1)) -- skipping."
 else
+    # The same official installer script works on both Linux and macOS and
+    # picks the right build for the running architecture itself, so there
+    # is no platform branch needed here at all.
     if curl -fsSL https://deno.land/install.sh | sh -s -- -y >/tmp/deno-install.log 2>&1; then
         DENO_BIN="$(find "${HOME}/.deno/bin" -name deno 2>/dev/null | head -n1)"
         if [ -n "$DENO_BIN" ]; then
             cp "$DENO_BIN" "${LOCAL_BIN}/deno"
             chmod a+rx "${LOCAL_BIN}/deno"
+            [ "$PLATFORM" = "macos" ] && xattr -d com.apple.quarantine "${LOCAL_BIN}/deno" 2>/dev/null || true
             echo "Installed deno to ${LOCAL_BIN}/deno ($(${LOCAL_BIN}/deno --version | head -n1))."
         else
             warn "Deno installer ran but the binary wasn't found under ${HOME}/.deno/bin -- see /tmp/deno-install.log."
@@ -201,9 +317,10 @@ else
         warn "Deno install failed -- see /tmp/deno-install.log. YouTube downloads may hit errors or miss formats until this is resolved. Retry manually: curl -fsSL https://deno.land/install.sh | sh"
     fi
 fi
-# run_ytdlp.ps1 expects deno at exactly $HOME/.local/bin/deno (it builds
-# this path itself via --js-runtimes, not read from PATH) -- if you ever
-# install deno somewhere else, that line needs updating too.
+# run_ytdlp.ps1 no longer requires deno at one exact hardcoded path: it
+# probes $HOME/.local/bin/deno, then $HOME/.deno/bin/deno, then Homebrew's
+# prefixes, then PATH, and logs a clear warning if none of them hit. So an
+# install somewhere else still works -- it just isn't the tidiest outcome.
 
 # --- Step 7: fetch the project files ---
 # Convenience step: pulls the actual project files down automatically so
@@ -218,10 +335,10 @@ fi
 # that ever needed git (nothing in ytdl, run_ytdlp.ps1 or postprocess.ps1
 # touches it), that it no longer matters whether the repo is public,
 # private, or reachable over SSH vs HTTPS, and that a plain HTTPS GET of
-# five known filenames has far fewer ways to fail on a fresh VM than a
-# clone does. git is still installed in Step 2 and still reported in the
-# Step 12 verification, because you will want it on this VM to edit the
-# project -- the pipeline just no longer *depends* on it.
+# five known filenames has far fewer ways to fail on a fresh machine than
+# a clone does. git is still installed in Step 2 and still reported in the
+# Step 12 verification, because you will want it on this machine to edit
+# the project -- the pipeline just no longer *depends* on it.
 #
 # Files already sitting next to setup.sh are used as-is and never
 # downloaded over. That is deliberate and load-bearing for the
@@ -231,9 +348,8 @@ fi
 log "Downloading project files"
 mkdir -p "$DOWNLOAD_DIR"
 
-# curl first (already required by the Deno install in Step 6), wget as the
-# fallback -- Step 2 installs both, but a minimal image that lost one of
-# them should not take the whole setup down.
+# curl first (already required by the Deno install in Step 6, and present
+# by default on macOS), wget as the fallback.
 download_to() {
     local url="$1" dest="$2"
     if command -v curl >/dev/null 2>&1; then
@@ -261,33 +377,36 @@ for project_file in "${PROJECT_FILES[@]}"; do
             warn "Downloaded '${project_file}' was empty -- treating as a failed download. Fetch it manually from ${RAW_BASE}/${project_file} into ${DOWNLOAD_DIR}"
         elif head -n 1 "$part" | grep -qiE '^\s*<(!doctype|html)'; then
             rm -f "$part"
-            warn "'${project_file}' came back as an HTML page rather than the file itself -- something (a proxy, captive portal, or DNS interception) answered instead of GitHub. Check the VM's network, then re-run."
+            warn "'${project_file}' came back as an HTML page rather than the file itself -- something (a proxy, captive portal, or DNS interception) answered instead of GitHub. Check this machine's network, then re-run."
         else
             mv "$part" "${DOWNLOAD_DIR}/${project_file}"
             echo "Downloaded ${project_file}"
         fi
     else
         rm -f "$part"
-        warn "Could not download '${project_file}' from ${RAW_BASE}/${project_file}. Check network/DNS from inside the VM, or place the file next to setup.sh (${SCRIPT_DIR}) and re-run."
+        warn "Could not download '${project_file}' from ${RAW_BASE}/${project_file}. Check network/DNS, or place the file next to setup.sh (${SCRIPT_DIR}) and re-run."
     fi
 done
 
 # --- VMware guest detection (used by Step 8 below) ---
-# systemd-detect-virt is the primary check -- reliable on any systemd-based
-# Ubuntu install, which this always is. A DMI fallback is included as a
-# second, independent signal in case systemd-detect-virt is ever
-# inconclusive (e.g. it can report "none" from inside some nested-virt or
-# minimal-container setups even under VMware) -- VMware's virtual hardware
-# always identifies itself in the DMI product_name table regardless, so
-# this catches that case without depending on systemd's own detection at
-# all. Computed once, up front, so Step 8 (and anything else that might
-# ever need it) just reads the one $IS_VMWARE flag instead of re-running
-# the detection logic inline.
+# Linux-only: this whole concept is about a Linux VM mounting a shared
+# folder from its host, which has no macOS counterpart worth automating
+# (a Mac running this is the host, not the guest).
 IS_VMWARE=0
-if systemd-detect-virt 2>/dev/null | grep -qi vmware; then
-    IS_VMWARE=1
-elif [ -r /sys/class/dmi/id/product_name ] && grep -qi vmware /sys/class/dmi/id/product_name 2>/dev/null; then
-    IS_VMWARE=1
+if [ "$PLATFORM" = "linux" ]; then
+    # systemd-detect-virt is the primary check -- reliable on any
+    # systemd-based Ubuntu install, which this always is. A DMI fallback is
+    # included as a second, independent signal in case systemd-detect-virt
+    # is ever inconclusive (e.g. it can report "none" from inside some
+    # nested-virt or minimal-container setups even under VMware) -- VMware's
+    # virtual hardware always identifies itself in the DMI product_name
+    # table regardless, so this catches that case without depending on
+    # systemd's own detection at all.
+    if systemd-detect-virt 2>/dev/null | grep -qi vmware; then
+        IS_VMWARE=1
+    elif [ -r /sys/class/dmi/id/product_name ] && grep -qi vmware /sys/class/dmi/id/product_name 2>/dev/null; then
+        IS_VMWARE=1
+    fi
 fi
 
 # --- Step 8: VMware shared folder support (safe no-op outside VMware) ---
@@ -296,7 +415,9 @@ fi
 # and it isn't actually necessary: restarting the vmtoolsd service and
 # mounting directly gets the shared folder working immediately.
 log "Setting up VMware shared folder (open-vm-tools)"
-if [ "$IS_VMWARE" -eq 1 ]; then
+if [ "$PLATFORM" = "macos" ]; then
+    echo "Not applicable on macOS (this step configures a Linux VM guest's access to its host's shared folders) -- skipping."
+elif [ "$IS_VMWARE" -eq 1 ]; then
     if ! sudo apt install -y open-vm-tools open-vm-tools-desktop; then
         warn "open-vm-tools install failed (open-vm-tools-desktop in particular can fail on a minimal/headless install if its GUI dependencies don't resolve). Shared folder won't be available. Retry with: sudo apt install -y open-vm-tools (drop -desktop if you're headless)."
     else
@@ -320,46 +441,69 @@ else
 fi
 
 # --- Desktop-environment detection (used by Step 9 below) ---
-# Checked by looking for an installed file manager / desktop metapackage
-# rather than reading $XDG_CURRENT_DESKTOP or $DISPLAY: those describe the
-# session this script happens to be RUNNING in, which is wrong twice over
-# -- setup run over SSH into a VM that does have a desktop would look
-# headless, and nothing here needs a GUI at install time anyway, only at
-# the point someone later opens the file manager. What actually matters is
-# whether a desktop is INSTALLED, which is what this tests. Skipping on a
-# genuinely headless box matters because the packages below pull in a
-# large GUI dependency tree that would be dead weight on a server install.
+# Linux-only concept. On macOS there is always a desktop, and the file
+# manager (Finder) previews everything this pipeline produces natively --
+# see Step 9.
 HAS_DESKTOP=0
-for gui_bin in nautilus nemo thunar dolphin pcmanfm; do
-    if command -v "$gui_bin" >/dev/null 2>&1; then
-        HAS_DESKTOP=1
-        break
-    fi
-done
-if [ "$HAS_DESKTOP" -eq 0 ]; then
-    for gui_pkg in ubuntu-desktop ubuntu-desktop-minimal kubuntu-desktop xubuntu-desktop; do
-        if dpkg -s "$gui_pkg" >/dev/null 2>&1; then
+if [ "$PLATFORM" = "macos" ]; then
+    HAS_DESKTOP=1
+else
+    # Checked by looking for an installed file manager / desktop
+    # metapackage rather than reading $XDG_CURRENT_DESKTOP or $DISPLAY:
+    # those describe the session this script happens to be RUNNING in,
+    # which is wrong twice over -- setup run over SSH into a VM that does
+    # have a desktop would look headless, and nothing here needs a GUI at
+    # install time anyway, only at the point someone later opens the file
+    # manager. What actually matters is whether a desktop is INSTALLED,
+    # which is what this tests. Skipping on a genuinely headless box
+    # matters because the packages below pull in a large GUI dependency
+    # tree that would be dead weight on a server install.
+    for gui_bin in nautilus nemo thunar dolphin pcmanfm; do
+        if command -v "$gui_bin" >/dev/null 2>&1; then
             HAS_DESKTOP=1
             break
         fi
     done
+    if [ "$HAS_DESKTOP" -eq 0 ]; then
+        for gui_pkg in ubuntu-desktop ubuntu-desktop-minimal kubuntu-desktop xubuntu-desktop; do
+            if dpkg -s "$gui_pkg" >/dev/null 2>&1; then
+                HAS_DESKTOP=1
+                break
+            fi
+        done
+    fi
 fi
 
 # --- Step 9: viewing thumbnails and subtitles in the desktop ---
 # Nothing in the pipeline itself needs any of this -- it downloads and
 # post-processes identically without it. This is purely so the archive is
-# BROWSABLE from inside the VM: thumbnail images that preview in the file
+# BROWSABLE from the desktop: thumbnail images that preview in the file
 # manager instead of showing a generic icon, and a player that actually
 # renders the subtitle tracks next to each video.
-#
-# Split into two independent apt calls rather than one combined package
-# list, so a failure in one group (e.g. a player package temporarily
-# unavailable) doesn't take the other group down with it -- same
-# keep-going principle as the rest of this script.
 log "Installing desktop preview support (thumbnails and subtitles)"
-if [ "$HAS_DESKTOP" -eq 0 ]; then
+if [ "$PLATFORM" = "macos" ]; then
+    # PLATFORM: almost all of the Linux work here is unnecessary on macOS.
+    # Finder and Quick Look already render .webp images (natively since
+    # macOS 11), generate poster frames for .mkv, and preview .vtt subtitle
+    # files as plain text -- no thumbnailer packages, no size-limit setting
+    # to raise. The only genuinely useful part is a player that renders the
+    # subtitle tracks, since QuickTime Player will not open .mkv at all.
+    if command -v brew >/dev/null 2>&1; then
+        if ! brew install --cask iina vlc; then
+            warn "Video player install failed -- QuickTime Player cannot open .mkv, so you'll have no way to view these videos or their subtitles until this is resolved. Retry with: brew install --cask iina vlc"
+        fi
+    else
+        warn "Skipped video player install -- Homebrew is not available (see Step 1). Note QuickTime Player cannot open .mkv files at all; install IINA or VLC to watch anything this pipeline produces."
+    fi
+    echo "Finder/Quick Look already preview .webp thumbnails, .mkv poster frames and .vtt subtitles natively -- no thumbnailer packages needed on macOS."
+elif [ "$HAS_DESKTOP" -eq 0 ]; then
     echo "No desktop environment detected (no file manager or desktop metapackage installed) -- skipping. The pipeline itself is unaffected; re-run this script after installing a desktop if you later want in-VM previews."
 else
+    # Split into two independent apt calls rather than one combined package
+    # list, so a failure in one group (e.g. a player package temporarily
+    # unavailable) doesn't take the other group down with it -- same
+    # keep-going principle as the rest of this script.
+    #
     # Thumbnailers.
     #   webp-pixbuf-loader -- yt-dlp saves the ORIGINAL thumbnail in
     #     whatever format YouTube served, which for YouTube is almost
@@ -426,19 +570,16 @@ mkdir -p "${DATA_ROOT}/Youtube Videos/Final Video"
 echo "Folder structure created."
 
 # --- Step 11: place the pipeline files and the archive viewer ---
-# Looks in three places, in order: next to setup.sh itself, inside the
-# download folder Step 7 filled, and inside a "linux" subfolder of it (the
-# last one is a leftover from when Step 7 cloned the whole repo -- kept
-# because it costs nothing and still resolves a hand-placed clone). Each
-# file is resolved and copied independently -- a missing one only warns
-# about itself and doesn't block the others.
+# Looks in two places, in order: next to setup.sh itself, then inside the
+# download folder Step 7 filled. Each file is resolved and copied
+# independently -- a missing one only warns about itself and doesn't block
+# the others.
 log "Installing pipeline files"
 copy_file() {
     local src="$1" dest="$2" label="$3"
     local candidates=(
         "${SCRIPT_DIR}/${src}"
         "${DOWNLOAD_DIR}/${src}"
-        "${DOWNLOAD_DIR}/linux/${src}"
     )
     for candidate in "${candidates[@]}"; do
         if [ -f "$candidate" ]; then
@@ -453,17 +594,17 @@ copy_file() {
 # below, after they've all run, to decide whether it's safe to delete the
 # downloaded files (see the cleanup block further down).
 WARNINGS_BEFORE_INSTALL="${#WARNINGS[@]}"
-copy_file "linux-run_ytdlp.ps1"   "${DATA_ROOT}/scripts/run_ytdlp.ps1"      "run_ytdlp.ps1"
-copy_file "linux-postprocess.ps1" "${DATA_ROOT}/scripts/postprocess.ps1"    "postprocess.ps1"
-copy_file "linux-yt-dlp.conf"     "${DATA_ROOT}/configs/yt-dlp.conf"        "yt-dlp.conf"
-copy_file "linux-ytdl"            "${LOCAL_BIN}/ytdl"                       "ytdl"
+# No filename rewriting here anymore. These used to be copied from
+# "linux-run_ytdlp.ps1" to "run_ytdlp.ps1" etc, because the repo carried a
+# separate prefixed copy per platform; there is now one unprefixed
+# cross-platform file, so source and destination names match.
+copy_file "run_ytdlp.ps1"     "${DATA_ROOT}/scripts/run_ytdlp.ps1"      "run_ytdlp.ps1"
+copy_file "postprocess.ps1"   "${DATA_ROOT}/scripts/postprocess.ps1"    "postprocess.ps1"
+copy_file "yt-dlp.conf"       "${DATA_ROOT}/configs/yt-dlp.conf"        "yt-dlp.conf"
+copy_file "ytdl"              "${LOCAL_BIN}/ytdl"                       "ytdl"
 # The viewer lives with the scripts rather than in ${LOCAL_BIN} because it is
 # a program, not a command -- ${LOCAL_BIN}/ytdl-view below is what you type.
-# It has no filename prefix because, unlike the four files above, it is not
-# OS-specific: the same file runs unmodified on Linux, macOS and Windows,
-# which matters here since the archive is often read from the host rather
-# than from inside this VM.
-copy_file "archive-viewer.py"     "${DATA_ROOT}/scripts/archive-viewer.py"  "archive-viewer.py"
+copy_file "archive-viewer.py" "${DATA_ROOT}/scripts/archive-viewer.py"  "archive-viewer.py"
 if [ -f "${LOCAL_BIN}/ytdl" ]; then
     chmod +x "${LOCAL_BIN}/ytdl"
 fi
@@ -475,37 +616,54 @@ fi
 # Written here rather than shipped as a repo file. Every other installed
 # file is a copy of a repo source, and this one deliberately is not: its
 # entire content is a single exec line, so a repo file would exist only to
-# be copied and would be one more thing to keep in sync. It hardcodes
-# ${DATA_ROOT}'s script path for the same reason linux-ytdl hardcodes
-# $HOME/yt-dlp/scripts -- the *install* root is fixed even when the *data*
-# root moves. A custom data root is handled at runtime instead:
+# be copied and would be one more thing to keep in sync. A custom data root
+# is handled at runtime instead:
 #     ytdl-view --root /mnt/hgfs/yt-dlp-share/archive
-# The heredoc delimiter is quoted so $HOME and "$@" are written literally
-# and expand when the launcher runs, not now.
+# The heredoc delimiter is quoted so "$@" is written literally and expands
+# when the launcher runs, not now -- but ${DATA_ROOT} is substituted in
+# beforehand, so an install at a custom YTDLP_INSTALL_ROOT still points at
+# the right script.
 if [ -f "${DATA_ROOT}/scripts/archive-viewer.py" ]; then
-    cat > "${LOCAL_BIN}/ytdl-view" <<'YTDL_VIEW_LAUNCHER'
+    cat > "${LOCAL_BIN}/ytdl-view" <<YTDL_VIEW_LAUNCHER
 #!/usr/bin/env bash
 # Generated by setup.sh -- thin launcher for archive-viewer.py.
 # All arguments pass straight through: --root, --port, --host,
 # --allow-open-local, --rescan, --help, and so on.
-exec python3 "$HOME/yt-dlp/scripts/archive-viewer.py" "$@"
+exec python3 "${DATA_ROOT}/scripts/archive-viewer.py" "\$@"
 YTDL_VIEW_LAUNCHER
     chmod +x "${LOCAL_BIN}/ytdl-view"
     echo "Installed ytdl-view -> ${LOCAL_BIN}/ytdl-view (launches the archive viewer)"
     # The viewer is pure standard library, so there is nothing to install for
     # it -- but it does need python3 to exist. Ubuntu always ships it, and
-    # Step 2 installs python3-pip which depends on it, so this is a
+    # macOS provides it with the Xcode Command Line Tools, so this is a
     # belt-and-braces check rather than an expected failure.
     if ! command -v python3 >/dev/null 2>&1; then
-        warn "python3 was not found, so 'ytdl-view' will not run. Install it with: sudo apt install -y python3"
+        if [ "$PLATFORM" = "macos" ]; then
+            warn "python3 was not found, so 'ytdl-view' will not run. Install it with: xcode-select --install (or: brew install python3)"
+        else
+            warn "python3 was not found, so 'ytdl-view' will not run. Install it with: sudo apt install -y python3"
+        fi
     fi
 else
     warn "archive-viewer.py was not installed, so the 'ytdl-view' launcher was skipped."
 fi
 
-if ! echo "$PATH" | tr ':' '\n' | grep -q "${LOCAL_BIN}"; then
-    echo "export PATH=\"${LOCAL_BIN}:\$PATH\"" >> "${HOME}/.bashrc"
-    echo "Added ${LOCAL_BIN} to PATH in ~/.bashrc -- run 'source ~/.bashrc' or start a new shell before using 'ytdl'."
+# PATH wiring. PLATFORM: which startup file to append to depends on the
+# login shell, not on the OS as such -- but in practice macOS defaults to
+# zsh and Ubuntu to bash, so this checks $SHELL rather than $PLATFORM and
+# gets the right answer on a machine where the user changed it.
+if ! echo "$PATH" | tr ':' '\n' | grep -q "^${LOCAL_BIN}$"; then
+    case "$SHELL" in
+        */zsh)  SHELL_RC="${HOME}/.zshrc" ;;
+        */bash) SHELL_RC="${HOME}/.bashrc" ;;
+        *)
+            # Unknown shell: fall back to whichever rc file already exists,
+            # preferring the platform default.
+            if [ "$PLATFORM" = "macos" ]; then SHELL_RC="${HOME}/.zshrc"; else SHELL_RC="${HOME}/.bashrc"; fi
+            ;;
+    esac
+    echo "export PATH=\"${LOCAL_BIN}:\$PATH\"" >> "$SHELL_RC"
+    echo "Added ${LOCAL_BIN} to PATH in ${SHELL_RC} -- run 'source ${SHELL_RC}' or start a new shell before using 'ytdl'."
 fi
 
 # --- Clean up the downloaded installation files now that they're copied ---
@@ -538,19 +696,20 @@ if [ -d "$DOWNLOAD_DIR" ]; then
 fi
 
 # --- Step 12: verify ---
-# NOTE: yt-dlp is installed to ${LOCAL_BIN} (not via apt), same as deno --
-# so it's checked via its full path below, same as deno's own check just
-# beneath it, rather than the bare "yt-dlp" command. Checking via bare
-# "yt-dlp" here previously produced a false "NOT FOUND" on a fresh install:
-# ${LOCAL_BIN} was only just added to PATH via ~/.bashrc a few lines up,
-# which (per the ytdl check's own caveat below) doesn't take effect until
-# a new shell -- so on a fresh install this step would ALWAYS report
-# yt-dlp missing immediately after successfully installing it two steps
-# earlier. ffmpeg/pwsh/git are unaffected since those are installed via
-# apt onto a location already on PATH.
+# NOTE: yt-dlp is installed to ${LOCAL_BIN} (not via the package manager),
+# same as deno -- so it's checked via its full path below rather than the
+# bare "yt-dlp" command. Checking via bare "yt-dlp" here previously
+# produced a false "NOT FOUND" on a fresh install: ${LOCAL_BIN} was only
+# just added to PATH a few lines up, which (per the ytdl check's own caveat
+# below) doesn't take effect until a new shell -- so on a fresh install
+# this step would ALWAYS report yt-dlp missing immediately after
+# successfully installing it two steps earlier. ffmpeg/pwsh/git are
+# unaffected since those are installed onto a location already on PATH.
 log "Verifying installation"
+echo "platform: ${PLATFORM}"
 echo "yt-dlp:  $(${LOCAL_BIN}/yt-dlp --version 2>/dev/null || echo 'NOT FOUND')"
 echo "ffmpeg:  $(ffmpeg -version 2>/dev/null | head -n1 || echo 'NOT FOUND')"
+echo "ffprobe: $(ffprobe -version 2>/dev/null | head -n1 || echo 'NOT FOUND (postprocess.ps1 needs this for the info.json re-embed)')"
 echo "pwsh:    $(pwsh --version 2>/dev/null || echo 'NOT FOUND')"
 echo "deno:    $(${LOCAL_BIN}/deno --version 2>/dev/null | head -n1 || echo 'NOT FOUND')"
 echo "git:     $(git --version 2>/dev/null || echo 'NOT FOUND')"
@@ -571,10 +730,34 @@ if [ -f "${DATA_ROOT}/scripts/archive-viewer.py" ] && command -v python3 >/dev/n
         warn "archive-viewer.py is installed but does not compile -- the download may be truncated. Delete ${DATA_ROOT}/scripts/archive-viewer.py and re-run this script."
     fi
 fi
+# Same idea for the two pwsh scripts: a syntax check that never executes
+# them. This did not exist before and is worth having now that one file
+# serves three platforms -- a syntax error introduced while editing would
+# otherwise only surface at the end of a real download, after the video is
+# already on disk and the after_move hook fires.
+if command -v pwsh >/dev/null 2>&1; then
+    for ps_script in run_ytdlp.ps1 postprocess.ps1; do
+        if [ -f "${DATA_ROOT}/scripts/${ps_script}" ]; then
+            if pwsh -NoProfile -Command "
+                \$errors = \$null
+                [System.Management.Automation.Language.Parser]::ParseFile('${DATA_ROOT}/scripts/${ps_script}', [ref]\$null, [ref]\$errors) | Out-Null
+                if (\$errors.Count -gt 0) { \$errors | ForEach-Object { Write-Output \$_.Message }; exit 1 }
+                exit 0" >/dev/null 2>&1; then
+                echo "syntax:  ${ps_script} parses cleanly"
+            else
+                warn "${ps_script} has a PowerShell syntax error -- it will fail at runtime. Re-download it or check your edits."
+            fi
+        fi
+    done
+fi
 # Desktop-only, and only meaningful if Step 9 actually ran -- reported as
 # "skipped (no desktop)" rather than "NOT FOUND" on a headless install, so
 # a deliberate skip doesn't read as a failure in the summary.
-if [ "$HAS_DESKTOP" -eq 1 ]; then
+if [ "$PLATFORM" = "macos" ]; then
+    echo "iina:    $([ -d '/Applications/IINA.app' ] && echo 'installed' || echo 'NOT FOUND')"
+    echo "vlc:     $([ -d '/Applications/VLC.app' ] && echo 'installed' || echo 'NOT FOUND')"
+    echo "previews: handled natively by Finder/Quick Look on macOS"
+elif [ "$HAS_DESKTOP" -eq 1 ]; then
     echo "mpv:     $(mpv --version 2>/dev/null | head -n1 || echo 'NOT FOUND')"
     echo "vlc:     $(vlc --version 2>/dev/null | head -n1 || echo 'NOT FOUND')"
     echo "webp:    $(dpkg -s webp-pixbuf-loader >/dev/null 2>&1 && echo 'webp-pixbuf-loader installed (.webp thumbnails will render)' || echo 'NOT FOUND')"
@@ -602,4 +785,4 @@ echo -e "\nTest with: ytdl \"https://www.youtube.com/watch?v=SOME_SHORT_VIDEO_ID
 echo -e "Then browse what you archived -- video, subtitles, transcript, metadata"
 echo -e "and the full comment thread -- with: ytdl-view"
 echo -e "  (add --root /path/to/archive if you downloaded to a custom data root,"
-echo -e "   and --allow-open-local to let the page hand files to mpv/vlc)"
+echo -e "   and --allow-open-local to let the page hand files to a local player)"

@@ -1,9 +1,10 @@
 param(
     [Parameter(Mandatory = $true)][string]$Url,
-    # Optional. If omitted, data lives under $HOME/yt-dlp same as before.
+    # Optional. If omitted, data lives under the platform's default install
+    # root (see the platform-resolution block below) same as before.
     # If given, ONLY the data (Archive Logs/, Youtube Videos/) moves here --
-    # the pipeline install itself (scripts/, configs/) always stays at
-    # $HOME/yt-dlp, since ytdl has to know where to find run_ytdlp.ps1 in
+    # the pipeline install itself (scripts/, configs/) always stays at the
+    # install root, since ytdl has to know where to find run_ytdlp.ps1 in
     # the first place, before any argument parsing can happen.
     [Parameter(Mandatory = $false)][string]$DataRoot = "",
 
@@ -84,18 +85,109 @@ param(
 # On PowerShell 7.3+, native-command stderr lines get wrapped as ErrorRecord
 # objects when redirected (2>&1 below), which prints/logs them as noisy
 # "NativeCommandError" blocks instead of yt-dlp's plain warning/error text.
-# This restores plain-text passthrough. Applies the same on Linux as Windows.
+# This restores plain-text passthrough. Applies identically on all three
+# platforms.
 $PSNativeCommandUseErrorActionPreference = $false
 
-# --- Resolve roots ---
-# $HOME is pwsh's own built-in automatic variable, cross-platform since
-# PowerShell Core -- no hardcoded username anywhere, works for whatever
-# account actually runs this.
-$installRoot = Join-Path $HOME "yt-dlp"
+# =====================================================================
+# PLATFORM RESOLUTION
+# =====================================================================
+# This is the ONLY place in this script that knows which OS it's on.
+# Everything below this block is platform-agnostic and reads the variables
+# set here. This file used to exist as two separate copies (a Windows one
+# and a Linux one) that drifted badly apart -- the Windows copy sat ~29
+# commits behind for a month, missing -DataRoot, the playlist switches,
+# -Workers, deno support and the locking rework, because every feature had
+# to be written twice and the second write kept not happening. One file
+# with one small branch at the top is what stops that recurring.
+#
+# $IsWindows / $IsMacOS / $IsLinux are pwsh's own built-in automatic
+# variables (PowerShell 6+), not something this script has to detect.
+#
+# Everything below is a DEFAULT: $env:YTDLP_INSTALL_ROOT overrides the
+# install root on any platform, for anyone who wants the pipeline
+# somewhere else entirely.
+if ($IsWindows) {
+    $platformName = "Windows"
+    # Kept at the drive root rather than moved under $HOME (which pwsh does
+    # resolve correctly on Windows) for two reasons. First, it's where the
+    # existing Windows install already lives, so nothing has to move.
+    # Second and more importantly, MAX_PATH: Windows still caps most paths
+    # at 260 characters unless long-path support is explicitly enabled, and
+    # this pipeline's per-video paths are genuinely long -- a 40-char
+    # uploader folder, then a second folder repeating uploader + date + id
+    # + a 60-char title, then "Pre-merge streams/Final Video.f137.mp4".
+    # That lands near 240 characters before the data root is even prefixed.
+    # "C:/yt-dlp" costs 9 of the budget; "C:/Users/<name>/yt-dlp" can
+    # easily cost twice that and pushes real videos over the limit.
+    $defaultInstallRoot = "C:/yt-dlp"
+    # yt-dlp's Windows build appends .exe; deno's own installer puts it
+    # under $HOME\.deno\bin rather than the ~/.local/bin convention used
+    # on the Unix side.
+    $denoCandidates = @(
+        (Join-Path $HOME ".deno/bin/deno.exe"),
+        (Join-Path $HOME ".local/bin/deno.exe")
+    )
+} elseif ($IsMacOS) {
+    $platformName = "macOS"
+    $defaultInstallRoot = Join-Path $HOME "yt-dlp"
+    $denoCandidates = @(
+        (Join-Path $HOME ".local/bin/deno"),
+        (Join-Path $HOME ".deno/bin/deno"),
+        "/opt/homebrew/bin/deno",
+        "/usr/local/bin/deno"
+    )
+} else {
+    $platformName = "Linux"
+    $defaultInstallRoot = Join-Path $HOME "yt-dlp"
+    $denoCandidates = @(
+        (Join-Path $HOME ".local/bin/deno"),
+        (Join-Path $HOME ".deno/bin/deno")
+    )
+}
+
+$installRoot = if ([string]::IsNullOrWhiteSpace($env:YTDLP_INSTALL_ROOT)) {
+    $defaultInstallRoot
+} else {
+    $env:YTDLP_INSTALL_ROOT
+}
+
 $scriptsRoot = Join-Path $installRoot "scripts"
 $configsRoot = Join-Path $installRoot "configs"
 $confFile    = Join-Path $configsRoot "yt-dlp.conf"
 
+# --js-runtimes lives here rather than in yt-dlp.conf, since it needs a
+# real, resolved path (deno's install location differs per platform), and
+# yt-dlp.conf is deliberately static, username- and path-independent text
+# with no per-user paths in it at all.
+#
+# Resolved by probing the known install locations and then falling back to
+# whatever is on PATH, rather than the old hardcoded single path. The
+# hardcode was fine while this only ran on one platform with one installer,
+# but it silently passed a non-existent path (and produced a confusing
+# yt-dlp error rather than a clear one) any time deno had been installed
+# somewhere else. If nothing is found, --js-runtimes is omitted entirely
+# and a warning is logged -- yt-dlp still runs, just with the less reliable
+# extraction fallback described in yt-dlp.conf.
+$denoPath = $denoCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $denoPath) {
+    $denoCommand = Get-Command deno -ErrorAction SilentlyContinue
+    if ($denoCommand) { $denoPath = $denoCommand.Source }
+}
+# Wrapped in an outer @() so this is always a real array. PowerShell
+# unrolls an if-expression's result through the pipeline, which turns an
+# empty branch into $null and a one-element branch into a bare scalar.
+# Splatting $null happens to behave the same as splatting an empty array,
+# so this particular case worked by luck rather than by construction --
+# but the same pattern bit the Windows launcher for real (see ytdl.ps1's
+# $rest), so it is pinned down here too rather than left to chance.
+$jsRuntimeArgs = @(if ($denoPath) { @("--js-runtimes", "deno:$denoPath") } else { @() })
+
+# =====================================================================
+# END PLATFORM RESOLUTION
+# =====================================================================
+
+# --- Resolve roots ---
 if ([string]::IsNullOrWhiteSpace($DataRoot)) {
     $dataRoot = $installRoot
 } else {
@@ -117,7 +209,7 @@ $globalManifest  = Join-Path $videosRoot "global_manifest.json"
 
 # --- Self-heal the folder structure (runs every invocation) ---
 # If the whole tree (or any part of it) ever gets wiped -- a clean re-clone,
-# an accidental rm -rf, starting fresh on a new disk, or just the first time
+# an accidental delete, starting fresh on a new disk, or just the first time
 # a new -DataRoot is used -- this recreates every structural folder the
 # pipeline depends on before doing anything else. Deliberately does NOT
 # touch anything inside "Complete Archive" itself (each video's own folder
@@ -157,21 +249,19 @@ $timestamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
 # ever point -DataRoot at, so there's no reason to redo this check just
 # because you switched download destinations.
 #
-# yt-dlp: safe, real, built-in self-update -- yt-dlp -U replaces its own exe
-# in place and is designed for exactly this, identically on Linux. It no-ops
-# harmlessly if yt-dlp was installed via a package manager that doesn't
-# support self-update (e.g. apt) rather than the standalone binary.
+# yt-dlp: safe, real, built-in self-update -- yt-dlp -U replaces its own
+# binary in place and is designed for exactly this, identically on all
+# three platforms. It no-ops harmlessly if yt-dlp was installed via a
+# package manager that doesn't support self-update (apt, Homebrew, winget)
+# rather than the standalone binary.
 #
-# ffmpeg / pwsh: check-and-warn only, NOT auto-replace, same reasoning as the
-# Windows version -- neither has a safe built-in self-update, and pwsh is the
-# interpreter currently running this very script. On Ubuntu both are
-# normally managed by apt, so this checks apt's own upgradable-package list
-# rather than comparing against upstream release numbers, which wouldn't
-# line up with Ubuntu's (older, distro-patched) package versions anyway.
-# NOTE: this reads apt's existing local cache -- it does not run
-# "apt update" itself, since that needs root and a background video-download
-# script silently invoking sudo is not something to do unattended. Run
-# "sudo apt update" yourself periodically for this check to stay accurate.
+# ffmpeg / pwsh: check-and-warn only, NOT auto-replace. Neither has a safe
+# built-in self-update, and pwsh is the interpreter currently running this
+# very script -- attempting to overwrite its own binary mid-session risks a
+# locked-file failure or a broken install. What "check" means is
+# necessarily platform-specific, since it's really a question about the
+# package manager that owns those two binaries, so it's the one part of
+# this script (besides the platform block itself) that has to branch.
 $updateThrottleMarker = Join-Path $installRoot ".last_dependency_check"
 $updateThrottleHours = 24
 $needsDependencyCheck = $true
@@ -199,24 +289,77 @@ try {
 }
 
 if ($needsDependencyCheck) {
-    "-- Dependency check (throttled to once/$updateThrottleHours`h) --" | Tee-Object -FilePath $logFile -Append
+    "-- Dependency check on $platformName (throttled to once/$updateThrottleHours`h) --" | Tee-Object -FilePath $logFile -Append
     # Same streaming-log fix as in postprocess.ps1: log each line as
     # yt-dlp -U produces it (a self-update download included) rather than
     # buffering the whole thing into a variable first.
     & yt-dlp -U 2>&1 | ForEach-Object { "  [yt-dlp -U] $_" | Tee-Object -FilePath $logFile -Append }
 
-    $aptUpgradable = $null
-    try {
-        $aptUpgradable = & apt list --upgradable 2>$null
-    } catch {
-        "  [apt check] Could not query apt's upgradable-package list: $($_.Exception.Message)" | Tee-Object -FilePath $logFile -Append
-    }
-    if ($aptUpgradable) {
-        if ($aptUpgradable -match '^powershell/') {
-            "  WARNING: an apt update is available for powershell. Update at a natural stopping point with: sudo apt update && sudo apt install --only-upgrade powershell" | Tee-Object -FilePath $logFile -Append
+    if ($IsWindows) {
+        # winget's own upgrade listing, filtered to the two packages this
+        # pipeline actually cares about. Replaces the older approach of
+        # querying the GitHub releases API for pwsh and gyan.dev's
+        # release-version endpoint for ffmpeg: those compared against
+        # UPSTREAM version numbers, which don't necessarily match what the
+        # local package manager installed or can install, and they broke
+        # whenever either site changed shape. winget already knows both
+        # what's installed and what it can upgrade to.
+        try {
+            $wingetUpgradable = & winget upgrade --disable-interactivity 2>$null
+            if ($wingetUpgradable) {
+                if ($wingetUpgradable -match 'Microsoft\.PowerShell') {
+                    "  WARNING: a winget update is available for PowerShell. Update at a natural stopping point with: winget upgrade --id Microsoft.PowerShell" | Tee-Object -FilePath $logFile -Append
+                }
+                if ($wingetUpgradable -match '(?i)ffmpeg') {
+                    "  WARNING: a winget update is available for ffmpeg. Update at a natural stopping point with: winget upgrade --id Gyan.FFmpeg" | Tee-Object -FilePath $logFile -Append
+                }
+            }
+        } catch {
+            "  [winget check] Could not query winget's upgrade list: $($_.Exception.Message)" | Tee-Object -FilePath $logFile -Append
         }
-        if ($aptUpgradable -match '^ffmpeg/') {
-            "  WARNING: an apt update is available for ffmpeg. Update at a natural stopping point with: sudo apt update && sudo apt install --only-upgrade ffmpeg" | Tee-Object -FilePath $logFile -Append
+    } elseif ($IsMacOS) {
+        # Homebrew's own outdated list. Like apt below, this reads what brew
+        # already knows rather than running "brew update" itself -- a
+        # background download script silently refreshing package indexes
+        # (and potentially triggering a long network stall mid-run) is not
+        # something to do unattended. Run "brew update" yourself
+        # periodically for this check to stay accurate.
+        try {
+            $brewOutdated = & brew outdated --quiet 2>$null
+            if ($brewOutdated) {
+                if ($brewOutdated -match '(?im)^powershell$') {
+                    "  WARNING: a Homebrew update is available for powershell. Update at a natural stopping point with: brew update && brew upgrade --cask powershell" | Tee-Object -FilePath $logFile -Append
+                }
+                if ($brewOutdated -match '(?im)^ffmpeg$') {
+                    "  WARNING: a Homebrew update is available for ffmpeg. Update at a natural stopping point with: brew update && brew upgrade ffmpeg" | Tee-Object -FilePath $logFile -Append
+                }
+            }
+        } catch {
+            "  [brew check] Could not query Homebrew's outdated list: $($_.Exception.Message)" | Tee-Object -FilePath $logFile -Append
+        }
+    } else {
+        # On Ubuntu both are normally managed by apt, so this checks apt's
+        # own upgradable-package list rather than comparing against upstream
+        # release numbers, which wouldn't line up with Ubuntu's (older,
+        # distro-patched) package versions anyway.
+        # NOTE: this reads apt's existing local cache -- it does not run
+        # "apt update" itself, since that needs root and a background
+        # video-download script silently invoking sudo is not something to
+        # do unattended. Run "sudo apt update" yourself periodically for
+        # this check to stay accurate.
+        $aptUpgradable = $null
+        try {
+            $aptUpgradable = & apt list --upgradable 2>$null
+        } catch {
+            "  [apt check] Could not query apt's upgradable-package list: $($_.Exception.Message)" | Tee-Object -FilePath $logFile -Append
+        }
+        if ($aptUpgradable) {
+            if ($aptUpgradable -match '^powershell/') {
+                "  WARNING: an apt update is available for powershell. Update at a natural stopping point with: sudo apt update && sudo apt install --only-upgrade powershell" | Tee-Object -FilePath $logFile -Append
+            }
+            if ($aptUpgradable -match '^ffmpeg/') {
+                "  WARNING: an apt update is available for ffmpeg. Update at a natural stopping point with: sudo apt update && sudo apt install --only-upgrade ffmpeg" | Tee-Object -FilePath $logFile -Append
+            }
         }
     }
 
@@ -224,8 +367,8 @@ if ($needsDependencyCheck) {
 }
 
 # --- Versioned archival snapshot (#16): back up archive.txt + global manifest before this run ---
-if (Test-Path $archiveFile)    { Copy-Item $archiveFile "$historyDir/archive_$timestamp.txt" }
-if (Test-Path $globalManifest) { Copy-Item $globalManifest "$historyDir/global_manifest_$timestamp.json" }
+if (Test-Path $archiveFile)    { Copy-Item $archiveFile (Join-Path $historyDir "archive_$timestamp.txt") }
+if (Test-Path $globalManifest) { Copy-Item $globalManifest (Join-Path $historyDir "global_manifest_$timestamp.json") }
 
 $configVersion = $null
 if (Test-Path $confFile) {
@@ -237,9 +380,13 @@ $ffmpegRaw     = (& ffmpeg -version) 2>$null
 $ffmpegVersion = if ($ffmpegRaw) { ($ffmpegRaw -split "`n")[0] } else { $null }
 
 "==== Download session started $timestamp ====" | Tee-Object -FilePath $logFile -Append
+"platform: $platformName | install root: $installRoot" | Tee-Object -FilePath $logFile -Append
 "yt-dlp: $ytDlpVersion | ffmpeg: $ffmpegVersion | config version: $configVersion" | Tee-Object -FilePath $logFile -Append
 "URL: $Url" | Tee-Object -FilePath $logFile -Append
 if ($DataRoot) { "Data root override: $dataRoot" | Tee-Object -FilePath $logFile -Append }
+if (-not $denoPath) {
+    "WARNING: no deno binary found (looked in $($denoCandidates -join ', ') and on PATH). YouTube's JS challenge can't be solved without a JS runtime, which commonly shows up as mid-download HTTP 403 errors rather than an obvious 'no runtime' message. Install it and re-run setup, or see yt-dlp/yt-dlp#14404." | Tee-Object -FilePath $logFile -Append
+}
 if ($BreakOnExisting -or $PlaylistItems -or $DateAfter -or $LazyPlaylist -or ($Workers -gt 1)) {
     $optionNotes = @()
     if ($BreakOnExisting) { $optionNotes += "break-on-existing" }
@@ -253,17 +400,12 @@ if ($LazyPlaylist -and ($Workers -gt 1)) {
     "  NOTE: -LazyPlaylist has no effect combined with -Workers > 1 -- parallel dispatch already requires a full up-front listing (to build the worker queue), so there's no 'lazy' phase for it to skip." | Tee-Object -FilePath $logFile -Append
 }
 
-# --js-runtimes lives here rather than in yt-dlp.conf, since it needs a
-# real, resolved $HOME-based path (deno lives at $HOME/.local/bin/deno --
-# see setup.sh), and yt-dlp.conf is deliberately static, username-independent
-# text with no per-user paths in it at all.
-$denoPath = Join-Path $HOME ".local/bin/deno"
-
 # --ignore-config (used in every yt-dlp invocation below, single-stream or
 # parallel) stops yt-dlp from also auto-loading any yt-dlp.conf it finds in
-# the current directory, ~/.config/yt-dlp/, or next to the binary. Without
-# it, a stray leftover config file anywhere on the auto-discovery path
-# silently merges its own options (and any --exec lines) into every run.
+# the current directory, the per-user config dir (~/.config/yt-dlp/ on
+# Linux/macOS, %APPDATA%\yt-dlp\ on Windows), or next to the binary.
+# Without it, a stray leftover config file anywhere on the auto-discovery
+# path silently merges its own options (and any --exec lines) into every run.
 
 if ($Workers -le 1) {
     # ============================================================
@@ -274,7 +416,13 @@ if ($Workers -le 1) {
     # can vary with -DataRoot. CLI arguments take precedence over the same
     # setting in a --config-location file, so there's no conflict even
     # though none of these are present in yt-dlp.conf itself anymore.
-    $execCmd = "after_move:pwsh -NoProfile -File `"$scriptsRoot/postprocess.ps1`" -FilePath %(filepath)q -LogFileName `"download.log`""
+    #
+    # The pwsh invocation inside --exec uses the bare command name "pwsh"
+    # rather than a resolved absolute path: it's on PATH on all three
+    # platforms by the time anything can call this script (the launcher
+    # that got here was itself started by pwsh), and hardcoding a full path
+    # would mean a fourth platform-specific value to keep correct.
+    $execCmd = "after_move:pwsh -NoProfile -File `"$(Join-Path $scriptsRoot 'postprocess.ps1')`" -FilePath %(filepath)q -LogFileName `"download.log`""
 
     # Built as an array, not string-interpolated into $execCmd-style text,
     # so an empty/unused option never contributes a stray blank argument to
@@ -304,7 +452,7 @@ if ($Workers -le 1) {
         --download-archive $archiveFile `
         --paths "home:$completeArchiveDir" `
         --paths "temp:$incompleteDir" `
-        --js-runtimes "deno:$denoPath" `
+        @jsRuntimeArgs `
         --exec $execCmd `
         @playlistArgs `
         $Url 2>&1 | Tee-Object -Variable sessionOutput | Tee-Object -FilePath $logFile -Append
@@ -389,7 +537,32 @@ if ($Workers -le 1) {
             }
             if ($cutIndex -ge 0) {
                 $originalCount = $videoIds.Count
-                $videoIds = $videoIds[0..($cutIndex - 1)]
+                # $cutIndex of 0 means the very first enumerated video is
+                # already archived, i.e. nothing is new.
+                #
+                # This is a REAL BUG FIX, not a cross-platform adjustment.
+                # The previous code was an unguarded
+                # $videoIds[0..($cutIndex - 1)], which at $cutIndex = 0
+                # evaluates the range 0..-1 -- and PowerShell reads a
+                # descending range as "count DOWN", so 0..-1 is the two
+                # indexes 0 and -1, i.e. the FIRST element and (because -1
+                # means "from the end") the LAST one. Verified directly:
+                # against ids (aaa,bbb,ccc) with $cutIndex = 0 it returned
+                # (aaa,ccc) instead of nothing. So a --sync run whose newest
+                # video was already archived -- the single most common case
+                # for --sync, the "nothing new since last time" run -- did
+                # not stop as intended. It queued the already-archived video
+                # plus the OLDEST video in the listing, an unrelated video
+                # picked purely by an off-by-one wrapping around the end of
+                # the array. Only reachable with -Workers > 1, since the
+                # single-stream path hands --break-on-existing to yt-dlp
+                # itself rather than reimplementing it here.
+                #
+                # The outer @() is the same array-unrolling guard described
+                # at $jsRuntimeArgs above: it keeps $videoIds an array in
+                # both branches, instead of $null when empty and a bare
+                # string when exactly one video is new.
+                $videoIds = @(if ($cutIndex -eq 0) { @() } else { $videoIds[0..($cutIndex - 1)] })
                 "  -BreakOnExisting: stopping at the first already-archived video -- $($videoIds.Count) of $originalCount enumerated video(s) are actually new." | Tee-Object -FilePath $logFile -Append
             }
         }
@@ -435,11 +608,11 @@ if ($Workers -le 1) {
             $incompleteDir = $using:incompleteDir
             $scriptsRoot   = $using:scriptsRoot
             $logsDir       = $using:logsDir
-            $denoPath      = $using:denoPath
+            $jsRuntimeArgs = $using:jsRuntimeArgs
 
             $workerLogName = "download.worker-$id.log"
             $workerLogFile = Join-Path $logsDir $workerLogName
-            $workerExecCmd = "after_move:pwsh -NoProfile -File `"$scriptsRoot/postprocess.ps1`" -FilePath %(filepath)q -LogFileName `"$workerLogName`""
+            $workerExecCmd = "after_move:pwsh -NoProfile -File `"$(Join-Path $scriptsRoot 'postprocess.ps1')`" -FilePath %(filepath)q -LogFileName `"$workerLogName`""
             $videoUrl = "https://youtu.be/$id"
 
             "==== Download session started (worker, video $id) $(Get-Date -Format o) ====" | Set-Content -Path $workerLogFile
@@ -450,7 +623,7 @@ if ($Workers -le 1) {
                 --download-archive $archiveFile `
                 --paths "home:$completeArchiveDir" `
                 --paths "temp:$incompleteDir" `
-                --js-runtimes "deno:$denoPath" `
+                @jsRuntimeArgs `
                 --exec $workerExecCmd `
                 $videoUrl 2>&1 | Tee-Object -Variable workerOutput | Add-Content -Path $workerLogFile
 

@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Usage: ytdl <youtube-url> [download-root-path] [options]
 #
+# The POSIX launcher, used on BOTH Linux and macOS -- there is nothing in
+# here that differs between the two, so there is deliberately no separate
+# mac version to keep in sync. Windows has its own launcher (ytdl.ps1 plus
+# a one-line ytdl.cmd shim) because cmd.exe cannot run this file; that
+# launcher takes the exact same options and produces the exact same
+# run_ytdlp.ps1 invocation.
+#
 # <youtube-url> works identically whether it's a single video, a playlist,
 # or a whole channel -- yt-dlp's own extractor tells the two apart, not
 # this script, so there's nothing here (or in run_ytdlp.ps1) that branches
@@ -37,20 +44,26 @@
 # The second positional argument (a bare path, not starting with "--") is
 # still accepted for backward compatibility with existing muscle memory /
 # scripts: `ytdl <url> /some/path`. If given, it REPLACES the default
-# $HOME/yt-dlp data root (Archive Logs/, Youtube Videos/) for this run only
-# -- the pipeline install itself (scripts/, configs/) always stays at
-# $HOME/yt-dlp regardless, since this launcher needs a fixed, known
-# location to find run_ytdlp.ps1 in the first place, before any argument
-# parsing happens. If a relative path is given, run_ytdlp.ps1 resolves it
-# to an absolute path itself.
+# data root (Archive Logs/, Youtube Videos/) for this run only -- the
+# pipeline install itself (scripts/, configs/) always stays at the install
+# root regardless, since this launcher needs a fixed, known location to
+# find run_ytdlp.ps1 in the first place, before any argument parsing
+# happens. If a relative path is given, run_ytdlp.ps1 resolves it to an
+# absolute path itself.
 #
-# Unlike the Windows .bat version, bash doesn't need any special handling
-# here for a URL containing "=" (e.g. ...watch?v=abc123) -- that was a
+# Unlike the Windows launcher, bash doesn't need any special handling here
+# for a URL containing "=" (e.g. ...watch?v=abc123) -- that was a
 # cmd.exe-specific quirk (it treats "=" as an argument delimiter alongside
 # spaces). Bash only splits unquoted arguments on whitespace, so plain
 # "$1" is already safe -- including a custom path containing spaces, as
 # long as you quote or escape it the normal shell way when you type it
 # (e.g. ytdl <url> "/home/you/My Downloads" or ytdl <url> /home/you/My\ Downloads).
+
+# Install root. $HOME/yt-dlp on both Linux and macOS; overridable with
+# YTDLP_INSTALL_ROOT for an install kept somewhere else entirely. This must
+# agree with the platform block at the top of run_ytdlp.ps1, which reads
+# the same environment variable and falls back to the same default.
+INSTALL_ROOT="${YTDLP_INSTALL_ROOT:-${HOME}/yt-dlp}"
 
 URL="$1"
 if [ -z "$URL" ]; then
@@ -120,4 +133,4 @@ PWSH_ARGS=(-Url "$URL")
 [ "$LAZY_PLAYLIST" -eq 1 ] && PWSH_ARGS+=(-LazyPlaylist)
 [ -n "$WORKERS" ] && PWSH_ARGS+=(-Workers "$WORKERS")
 
-pwsh -NoProfile -File "$HOME/yt-dlp/scripts/run_ytdlp.ps1" "${PWSH_ARGS[@]}"
+pwsh -NoProfile -File "${INSTALL_ROOT}/scripts/run_ytdlp.ps1" "${PWSH_ARGS[@]}"

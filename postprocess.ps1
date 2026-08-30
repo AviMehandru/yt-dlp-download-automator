@@ -21,6 +21,35 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# =====================================================================
+# PLATFORM RESOLUTION
+# =====================================================================
+# Must match run_ytdlp.ps1's own platform block exactly -- this is the
+# same install root, resolved the same way, and the two scripts disagreeing
+# about where configs/ lives would silently produce a blank config version
+# in every manifest. See run_ytdlp.ps1 for why Windows keeps C:/yt-dlp
+# (MAX_PATH) rather than moving under $HOME like the Unix platforms.
+#
+# NOTE: only the INSTALL root is resolved here. The DATA root -- which may
+# have been overridden with run_ytdlp.ps1's -DataRoot -- is derived from
+# $FilePath's own ancestry further down instead, so it always reflects
+# whichever data root this particular video actually landed in without
+# needing that value passed in separately.
+if ($IsWindows) {
+    $defaultInstallRoot = "C:/yt-dlp"
+} else {
+    # Linux and macOS are identical here: $HOME/yt-dlp.
+    $defaultInstallRoot = Join-Path $HOME "yt-dlp"
+}
+$installRoot = if ([string]::IsNullOrWhiteSpace($env:YTDLP_INSTALL_ROOT)) {
+    $defaultInstallRoot
+} else {
+    $env:YTDLP_INSTALL_ROOT
+}
+# =====================================================================
+# END PLATFORM RESOLUTION
+# =====================================================================
+
 # --- Cross-platform advisory file locking ---
 # Needed once postprocess.ps1 can run for several videos AT THE SAME TIME
 # (under run_ytdlp.ps1 -Workers N): several instances of this script can
@@ -33,17 +62,17 @@ $ErrorActionPreference = "Stop"
 # This isn't hypothetical: it's the exact shape of bug that would corrupt
 # a manifest without ever throwing an error or appearing in any log.
 #
-# Deliberately NOT using the Linux `flock` binary: that would work here,
-# but this pipeline's Windows variant has no equivalent, and shelling out
-# to flock -c "..." to wrap a block of PowerShell is awkward (it means
+# Deliberately NOT using the Unix `flock` binary: that would work on Linux
+# and macOS, but Windows has no equivalent, and shelling out to
+# flock -c "..." to wrap a block of PowerShell is awkward anyway (it means
 # writing the block out to a temp script file just to invoke it under the
 # lock). Opening a file with FileShare.None instead is a plain .NET
-# primitive available identically on both platforms -- a second process
-# trying to open the same path the same way gets a normal IOException
-# until the first one closes it, which is all a mutex needs to do here.
-# This is advisory locking (it only blocks other code that also calls
-# Enter-Lock/Exit-Lock around the same path) -- fine for this use, since
-# every writer of these particular files is postprocess.ps1 itself.
+# primitive available identically on all three platforms -- a second
+# process trying to open the same path the same way gets a normal
+# IOException until the first one closes it, which is all a mutex needs to
+# do here. This is advisory locking (it only blocks other code that also
+# calls Enter-Lock/Exit-Lock around the same path) -- fine for this use,
+# since every writer of these particular files is postprocess.ps1 itself.
 function Enter-Lock {
     param(
         [Parameter(Mandatory = $true)][string]$LockPath,
@@ -84,14 +113,12 @@ try {
 
     # $dataRoot is the parent of "Youtube Videos" -- derived from $FilePath
     # itself (via $youtubeRoot above), so this correctly reflects whichever
-    # data root was actually used for THIS run (the default $HOME/yt-dlp,
-    # or a custom -DataRoot passed to run_ytdlp.ps1) without needing that
-    # value passed in separately. $installRoot (where scripts/configs live)
-    # is a different, fixed location -- always $HOME/yt-dlp regardless of
-    # -DataRoot -- so it's resolved independently via $HOME below rather
-    # than derived from $FilePath's ancestry.
-    $dataRoot    = Split-Path $youtubeRoot -Parent
-    $installRoot = Join-Path $HOME "yt-dlp"
+    # data root was actually used for THIS run (the platform default, or a
+    # custom -DataRoot passed to run_ytdlp.ps1) without needing that value
+    # passed in separately. $installRoot (where scripts/configs live) is a
+    # different, fixed location regardless of -DataRoot -- resolved in the
+    # platform block at the top rather than derived from $FilePath.
+    $dataRoot = Split-Path $youtubeRoot -Parent
 
     foreach ($d in @($logsDir, $urlsDir)) {
         if (!(Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
@@ -162,6 +189,10 @@ try {
     }
 
     # --- Locate the matching info.json (retry briefly for FS/AV-scan lag) ---
+    # The retry loop matters more on Windows than on the Unix platforms:
+    # real-time antivirus scanning routinely holds a just-written file open
+    # for a moment, so a file that definitely exists can still be briefly
+    # unreadable. Harmless everywhere else -- the first iteration finds it.
     $infoJsonFile = $null
     for ($i = 0; $i -lt 5; $i++) {
         $infoJsonFile = Get-ChildItem -Path $videoMetaDir -Filter "*.info.json" -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -183,8 +214,7 @@ try {
         # Degrade gracefully rather than aborting: still do checksums, the
         # manifest, and (importantly) the Final Video repository sync
         # below, just with blank URL/playlist fields. Recover what we can
-        # from the folder
-        # name itself, which encodes uploader/date/id/title.
+        # from the folder name itself, which encodes uploader/date/id/title.
         Log "WARNING: No .info.json found in $videoMetaDir after retrying. Continuing with filename-derived metadata only."
         $info = $null
         $folderName = Split-Path $videoDir -Leaf
@@ -214,8 +244,10 @@ try {
     # far in that session, not just its own portion. Exact per-video
     # boundaries aren't available for multi-video sessions since yt-dlp
     # doesn't mark them. This matches how you actually run it (one URL
-    # per invocation), where it's a perfect 1:1 copy.
-    $mainDownloadLog = Join-Path $dataRoot "Archive Logs/Logs/$LogFileName"
+    # per invocation), where it's a perfect 1:1 copy. Under -Workers > 1
+    # each worker has its own log (see $LogFileName above), which restores
+    # the 1:1 property for parallel runs too.
+    $mainDownloadLog = Join-Path (Join-Path (Join-Path $dataRoot "Archive Logs") "Logs") $LogFileName
     $completeLogFile = Join-Path $logsDir "video_complete.log"
     $sessionLines = $null
     if (Test-Path $mainDownloadLog) {
@@ -224,12 +256,12 @@ try {
         if ($startMatch) {
             $sessionLines = $allLines[($startMatch.LineNumber - 1)..($allLines.Count - 1)]
             $sessionLines | Set-Content -Path $completeLogFile
-            Log "Wrote video_complete.log (exact copy of this session from download.log)."
+            Log "Wrote video_complete.log (exact copy of this session from $LogFileName)."
         } else {
-            Log "WARNING: No session-start marker found in download.log; video_complete.log not written."
+            Log "WARNING: No session-start marker found in $LogFileName; video_complete.log not written."
         }
     } else {
-        Log "WARNING: download.log not found at $mainDownloadLog; video_complete.log not written."
+        Log "WARNING: $LogFileName not found at $mainDownloadLog; video_complete.log not written."
     }
 
     # Comments are now fetched by a separate pass below, after the video/
@@ -428,21 +460,34 @@ try {
     $fileHashes = [ordered]@{}
     $fileList = @()
     foreach ($f in $allFiles) {
-        $rel = $f.FullName.Substring($videoDir.Length + 1)
+        # Relative path, with the separator normalized to "/" regardless of
+        # platform. Without this, the same video archived on Windows and on
+        # Linux/macOS produces manifests and checksum files whose every key
+        # differs only by "\" vs "/" -- which makes them non-comparable
+        # across machines and breaks any consumer (archive-viewer.py
+        # included) that looks a path up by name. "/" is the portable
+        # choice: Windows accepts it everywhere as a path separator, so a
+        # value read back from the manifest still resolves natively there.
+        $rel = $f.FullName.Substring($videoDir.Length + 1).Replace([System.IO.Path]::DirectorySeparatorChar, '/')
         $fileList += $rel
         $hash = (Get-FileHash -Path $f.FullName -Algorithm SHA256).Hash
         $fileHashes[$rel] = $hash
     }
 
     # --- Checksums file (#10) ---
+    # Two-space separator between hash and path is the standard sha256sum
+    # format, so this file can be verified directly with the system tool:
+    #   sha256sum -c checksums.sha256    (Linux)
+    #   shasum -a 256 -c checksums.sha256 (macOS)
     $checksumLines = $fileHashes.GetEnumerator() | ForEach-Object { "$($_.Value)  $($_.Key)" }
     $checksumLines | Set-Content (Join-Path $videoMetaDir "checksums.sha256")
     Log "Wrote checksums for $($fileList.Count) files."
 
     # --- Config version, tool versions ---
-    # $installRoot (fixed at $HOME/yt-dlp), not $dataRoot -- configs/ lives
-    # with the pipeline install, not with a possibly-custom data root.
-    $confPath = Join-Path $installRoot "configs/yt-dlp.conf"
+    # $installRoot (resolved in the platform block at the top), not
+    # $dataRoot -- configs/ lives with the pipeline install, not with a
+    # possibly-custom data root.
+    $confPath = Join-Path (Join-Path $installRoot "configs") "yt-dlp.conf"
     $configVersion = $null
     if (Test-Path $confPath) {
         $m = Select-String -Path $confPath -Pattern "CONFIG_VERSION:\s*(\S+)" | Select-Object -First 1
@@ -451,10 +496,12 @@ try {
     $ytDlpVersion  = (& yt-dlp --version) 2>$null
     $ffmpegRaw     = (& ffmpeg -version) 2>$null
     $ffmpegVersion = if ($ffmpegRaw) { ($ffmpegRaw -split "`n")[0] } else { $null }
-    # Get-CimInstance (used in the Windows version) is WMI-based and doesn't
-    # exist on Linux. $PSVersionTable.OS is a built-in pwsh property that
-    # returns the OS version string identically cross-platform, no branching
-    # needed.
+    # Get-CimInstance (which the old Windows-only copy of this script used)
+    # is WMI-based and doesn't exist off Windows. $PSVersionTable.OS is a
+    # built-in pwsh property that returns a descriptive OS version string
+    # identically on all three platforms, so no branching is needed here at
+    # all -- one of the several places where "cross-platform" cost nothing
+    # more than picking the portable API in the first place.
     $osCaption     = $PSVersionTable.OS
 
     # --- manifest.json (#8) ---
@@ -555,9 +602,9 @@ try {
             }
 
             if (-not $channelUrl) {
-                Log "No channel_url found in info.json — skipped Channel Info refresh."
+                Log "No channel_url found in info.json -- skipped Channel Info refresh."
             } elseif (-not $needsRefresh) {
-                Log "Channel Info refreshed within the last $throttleHours hours — skipped."
+                Log "Channel Info refreshed within the last $throttleHours hours -- skipped."
             } else {
                 # Only clear the folder once we're actually about to repopulate it.
                 # Join-Path (not a literal "\*" suffix, which only means anything
