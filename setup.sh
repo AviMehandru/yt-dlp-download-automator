@@ -43,6 +43,86 @@ case "$(uname -s)" in
         ;;
 esac
 
+# --- Linux distribution family detection ---
+# Sets DISTRO_FAMILY and PKG. Every step below asks for packages by ROLE
+# ($PKGS_BASE, $PKGS_THUMB) rather than naming apt packages inline, so
+# supporting another distro means extending the maps here and nothing else.
+#
+# Detection reads ID first, then ID_LIKE, from /etc/os-release. ID_LIKE is
+# what makes derivatives work for free, and is the whole reason this is worth
+# doing properly rather than matching a hardcoded list of distro names: Mint
+# declares ID_LIKE=ubuntu, Pop!_OS "ubuntu debian", Manjaro and EndeavourOS
+# "arch", Rocky and Alma "rhel centos fedora". None of them need naming here.
+#
+# The surrounding spaces in the case patterns are deliberate. ID_LIKE is a
+# space-separated list, so matching *" arch "* against " $id $id_like "
+# tests for a whole word and cannot match "archlabs" or similar by accident.
+DISTRO_FAMILY="unknown"
+PKG=""
+DISTRO_PRETTY=""
+if [ "$PLATFORM" = "linux" ]; then
+    _id=""; _id_like=""
+    if [ -r /etc/os-release ]; then
+        . /etc/os-release 2>/dev/null || true
+        _id="${ID:-}"
+        _id_like="${ID_LIKE:-}"
+        DISTRO_PRETTY="${PRETTY_NAME:-${NAME:-unknown}}"
+    fi
+    case " ${_id} ${_id_like} " in
+        *" debian "*|*" ubuntu "*)             DISTRO_FAMILY="debian"; PKG="apt" ;;
+        *" fedora "*|*" rhel "*|*" centos "*)  DISTRO_FAMILY="fedora"; PKG="dnf" ;;
+        *" arch "*)                            DISTRO_FAMILY="arch";   PKG="pacman" ;;
+        *" suse "*|*" opensuse "*)             DISTRO_FAMILY="suse";   PKG="zypper" ;;
+        *)
+            # ID itself can be a hyphenated variant the word-boundary patterns
+            # above miss: openSUSE uses ID=opensuse-tumbleweed and
+            # ID=opensuse-leap. Handled separately rather than by loosening
+            # those patterns, which would invite false positives.
+            case "${_id}" in
+                opensuse*) DISTRO_FAMILY="suse";    PKG="zypper" ;;
+                *)         DISTRO_FAMILY="unknown"; PKG="" ;;
+            esac
+            ;;
+    esac
+    unset _id _id_like
+fi
+
+# --- Package name maps ---
+# Same role, different names. Where every family agrees (mpv, vlc,
+# ffmpegthumbnailer, webp-pixbuf-loader) the string is simply repeated, which
+# reads better than a conditional for one shared value.
+#
+# NO LONGER LISTED: apt-transport-https and software-properties-common. Those
+# existed only to add Microsoft's apt repository for PowerShell, and
+# PowerShell no longer comes from a distro repository at all -- see Step 4.
+case "$DISTRO_FAMILY" in
+    debian)
+        PKGS_BASE="curl wget git ffmpeg ca-certificates python3-pip"
+        PKGS_THUMB="webp-pixbuf-loader ffmpegthumbnailer gnome-sushi"
+        PKGS_PLAYERS="mpv vlc"
+        ;;
+    fedora)
+        PKGS_BASE="curl wget git ffmpeg ca-certificates python3-pip"
+        PKGS_THUMB="webp-pixbuf-loader ffmpegthumbnailer sushi"
+        PKGS_PLAYERS="mpv vlc"
+        ;;
+    arch)
+        # python-pip, not python3-pip: on Arch, python IS Python 3 and the
+        # package names carry no version prefix.
+        PKGS_BASE="curl wget git ffmpeg ca-certificates python-pip"
+        PKGS_THUMB="webp-pixbuf-loader ffmpegthumbnailer sushi"
+        PKGS_PLAYERS="mpv vlc"
+        ;;
+    suse)
+        PKGS_BASE="curl wget git ffmpeg ca-certificates python3-pip"
+        PKGS_THUMB="webp-pixbuf-loader ffmpegthumbnailer gnome-sushi"
+        PKGS_PLAYERS="mpv vlc"
+        ;;
+    *)
+        PKGS_BASE=""; PKGS_THUMB=""; PKGS_PLAYERS=""
+        ;;
+esac
+
 DATA_ROOT="${YTDLP_INSTALL_ROOT:-${HOME}/yt-dlp}"
 LOCAL_BIN="${HOME}/.local/bin"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -152,6 +232,56 @@ log()  {
 }
 warn() { echo "WARNING: $*"; WARNINGS+=("$*"); }
 
+# --- Package manager abstraction ---
+# Three verbs, one per family. Defined after warn() because they call it;
+# bash resolves function names at call time, so the ordering only matters for
+# invocation, not definition.
+#
+# Two per-family quirks are load-bearing and easy to get wrong:
+#
+#   Arch: `pacman -Sy` WITHOUT `-u` is a partial upgrade, which is the classic
+#   way to break an Arch install -- you refresh the package index but leave
+#   the system on older libraries, and the next package you install links
+#   against something that is no longer there. So the Arch path deliberately
+#   has no separate "refresh" step; pkg_update does the full `-Syu`, and
+#   pkg_refresh_only is a no-op that says so.
+#
+#   Fedora: `dnf check-update` exits 100 when updates ARE available. That is
+#   documented behaviour, not an error, so it must not be treated as failure.
+pkg_refresh_only() {
+    case "$PKG" in
+        apt)    sudo apt update ;;
+        dnf)    sudo dnf check-update || [ $? -eq 100 ] ;;
+        zypper) sudo zypper --non-interactive refresh ;;
+        pacman) echo "Skipping index-only refresh on Arch -- see pkg_update (a bare 'pacman -Sy' risks a partial upgrade)." ;;
+        *)      return 1 ;;
+    esac
+}
+pkg_update() {
+    case "$PKG" in
+        apt)    sudo apt upgrade -y ;;
+        dnf)    sudo dnf upgrade -y ;;
+        zypper) sudo zypper --non-interactive update ;;
+        pacman) sudo pacman -Syu --noconfirm ;;
+        *)      return 1 ;;
+    esac
+}
+# Takes a space-separated package list; unquoted on purpose so it word-splits
+# into separate arguments.
+pkg_install() {
+    local pkgs="$*"
+    [ -z "$pkgs" ] && return 0
+    case "$PKG" in
+        apt)    sudo apt install -y $pkgs ;;
+        dnf)    sudo dnf install -y $pkgs ;;
+        zypper) sudo zypper --non-interactive install $pkgs ;;
+        # --needed skips anything already present rather than reinstalling it,
+        # which is what makes re-running this script cheap on Arch.
+        pacman) sudo pacman -S --noconfirm --needed $pkgs ;;
+        *)      return 1 ;;
+    esac
+}
+
 mkdir -p "$LOCAL_BIN"
 
 # --- Step 1: update the system ---
@@ -170,11 +300,15 @@ if [ "$PLATFORM" = "macos" ]; then
         brew update || warn "brew update failed -- package installs below may use a stale index."
         brew upgrade || warn "brew upgrade failed -- continuing anyway."
     fi
+elif [ "$DISTRO_FAMILY" = "unknown" ]; then
+    warn "Could not identify this distribution from /etc/os-release (ID/ID_LIKE did not match debian, fedora, arch or suse), so no packages can be installed automatically. Install the dependencies by hand -- ffmpeg, git, curl, wget, python3-pip -- and re-run this script: the folder-structure, file-placement, launcher and PATH steps below are package-manager-agnostic and will still do their work."
 else
-    if ! sudo apt update; then
-        warn "apt update failed -- package installs below may use a stale index. Run 'sudo apt update' manually and re-run this script."
+    echo "Detected ${DISTRO_PRETTY:-$DISTRO_FAMILY} (family: $DISTRO_FAMILY, package manager: $PKG)."
+    # Arch has no index-only refresh here on purpose -- see pkg_refresh_only.
+    if ! pkg_refresh_only; then
+        warn "Package index refresh failed -- installs below may use a stale index."
     fi
-    sudo apt upgrade -y || warn "apt upgrade failed -- continuing anyway."
+    pkg_update || warn "System upgrade failed -- continuing anyway."
 fi
 
 # --- Step 2: base dependencies ---
@@ -194,9 +328,36 @@ if [ "$PLATFORM" = "macos" ]; then
     # ffprobe ships inside the same ffmpeg formula on macOS, same as the
     # Ubuntu package, so there's nothing extra to install for
     # postprocess.ps1's attachment-count probe.
+elif [ "$DISTRO_FAMILY" = "unknown" ]; then
+    warn "Skipped base package install -- unrecognised distribution (see Step 1). Install ffmpeg, git, curl, wget and pip by hand."
 else
-    if ! sudo apt install -y curl wget git ffmpeg ca-certificates apt-transport-https software-properties-common python3-pip; then
-        warn "Base package install failed. yt-dlp/ffmpeg/git may not work until you run: sudo apt install -y curl wget git ffmpeg ca-certificates apt-transport-https software-properties-common python3-pip"
+    if ! pkg_install "$PKGS_BASE"; then
+        warn "Base package install failed. yt-dlp/ffmpeg/git may not work until you install these by hand: $PKGS_BASE"
+    fi
+
+    # ffmpeg is the one package that is genuinely awkward outside Debian.
+    # Fedora and openSUSE both ship it only through a third-party repository
+    # (RPM Fusion and Packman respectively) for patent reasons; the versions
+    # in their own repos are either absent or codec-stripped.
+    #
+    # Those repositories are deliberately NOT enabled automatically. Adding a
+    # third-party package source is a lasting, system-wide change that affects
+    # every future update on the machine, which is not a reasonable thing for
+    # a video-archiver installer to decide unattended -- the same reasoning
+    # that keeps this script from installing Homebrew on macOS. The warning
+    # names the exact command instead.
+    if ! command -v ffmpeg >/dev/null 2>&1; then
+        case "$DISTRO_FAMILY" in
+            fedora)
+                warn "ffmpeg is not available from Fedora's own repositories (patent-encumbered codecs). Enable RPM Fusion, then re-run this script: sudo dnf install -y https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-\$(rpm -E %fedora).noarch.rpm && sudo dnf install -y ffmpeg"
+                ;;
+            suse)
+                warn "ffmpeg is not available from openSUSE's own repositories (patent-encumbered codecs). Add the Packman repository, then re-run this script. See https://en.opensuse.org/Additional_package_repositories#Packman -- afterwards: sudo zypper install ffmpeg"
+                ;;
+            *)
+                warn "ffmpeg was not installed and is required. Install it however this distribution provides it, then re-run this script."
+                ;;
+        esac
     fi
 fi
 
@@ -258,23 +419,90 @@ elif [ "$PLATFORM" = "macos" ]; then
         warn "Cannot install pwsh -- Homebrew is not available (see Step 1). Nothing in this pipeline can run without pwsh."
     fi
 else
-    # As of this writing, Microsoft has not published apt packages for
-    # Ubuntu 26.04 (open, unresolved gap on their end). Try apt first anyway
-    # in case that's changed by the time this runs; fall back to snap.
-    source /etc/os-release
-    APT_INSTALL_OK=0
-    if wget -q "https://packages.microsoft.com/config/ubuntu/${VERSION_ID}/packages-microsoft-prod.deb" -O /tmp/packages-microsoft-prod.deb 2>/dev/null; then
-        sudo dpkg -i /tmp/packages-microsoft-prod.deb >/dev/null 2>&1 || true
-        rm -f /tmp/packages-microsoft-prod.deb
-        sudo apt update >/dev/null 2>&1 || true
-        if sudo apt install -y powershell 2>/dev/null; then
-            APT_INSTALL_OK=1
-        fi
-    fi
-    if [ "$APT_INSTALL_OK" -eq 0 ]; then
-        echo "apt package for pwsh not available for Ubuntu ${VERSION_ID} -- falling back to snap."
-        if ! sudo snap install powershell --classic; then
-            warn "pwsh install failed via both apt and snap. Install manually before using the pipeline -- nothing else here can run without it."
+    # PowerShell is installed from Microsoft's own self-contained tarball into
+    # $HOME/.local, NOT from any distribution's package manager. This is the
+    # single change that made multi-distro support tractable, so it is worth
+    # explaining why rather than just how.
+    #
+    # Microsoft publishes repositories for only a handful of distributions,
+    # and the coverage is uneven in ways that bite exactly where you would not
+    # want them to: there was no apt package for Ubuntu 26.04 for a long while
+    # (which is why this step used to fall back to snap), Arch has only an AUR
+    # package -- which cannot be installed non-interactively without dragging
+    # in an AUR helper -- and openSUSE's situation shifts between releases.
+    # Supporting four families through their package managers would mean four
+    # fragile code paths, each capable of breaking independently whenever
+    # Microsoft changed its publishing.
+    #
+    # The tarball is one code path for every glibc distribution, needs no
+    # root, adds no repository to the system, and is exactly how this script
+    # already installs yt-dlp (Step 3) and Deno (Step 6) -- both of which live
+    # in $HOME/.local/bin for the same "no root-owned location" reasoning.
+    # Making pwsh the third is consistency, not a new idea.
+    #
+    # Trade-off, stated plainly: a package-manager install would be updated by
+    # the system's own upgrade cycle, and this one will not. That is why the
+    # dependency check in run_ytdlp.ps1 gained a version comparison for this
+    # case -- see the tarball branch there.
+    PWSH_DIR="${HOME}/.local/share/powershell"
+    # Pinned fallback, used only if the "latest" lookup below cannot reach
+    # GitHub. Bump it when convenient; it is a floor, not a ceiling.
+    PWSH_PINNED="7.4.6"
+
+    PWSH_ARCH=""
+    case "$(uname -m)" in
+        x86_64|amd64)   PWSH_ARCH="x64" ;;
+        aarch64|arm64)  PWSH_ARCH="arm64" ;;
+        armv7l|armv7)   PWSH_ARCH="arm32" ;;
+    esac
+
+    if [ -z "$PWSH_ARCH" ]; then
+        warn "Unsupported CPU architecture '$(uname -m)' -- Microsoft does not publish a PowerShell build for it, so pwsh cannot be installed automatically. Nothing in this pipeline can run without pwsh."
+    else
+        # Resolve the newest release by following GitHub's /releases/latest
+        # redirect and reading the tag out of the final URL. Deliberately not
+        # the GitHub API: the API is rate-limited per IP for unauthenticated
+        # callers, which fails unpredictably on shared or NATed networks,
+        # whereas the redirect is a plain HTTP 302 with no quota. Falls back
+        # to the pinned version if anything about that fails.
+        PWSH_VER="$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+                      https://github.com/PowerShell/PowerShell/releases/latest 2>/dev/null \
+                    | sed -n 's#.*/tag/v##p')"
+        case "$PWSH_VER" in
+            [0-9]*) : ;;                       # looks like a version, keep it
+            *) PWSH_VER="$PWSH_PINNED"
+               echo "Could not determine the latest PowerShell release -- falling back to the pinned version ${PWSH_PINNED}." ;;
+        esac
+
+        PWSH_TGZ="powershell-${PWSH_VER}-linux-${PWSH_ARCH}.tar.gz"
+        PWSH_URL="https://github.com/PowerShell/PowerShell/releases/download/v${PWSH_VER}/${PWSH_TGZ}"
+        echo "Installing PowerShell ${PWSH_VER} (linux-${PWSH_ARCH}) to ${PWSH_DIR}"
+
+        if curl -fsSL --retry 3 --retry-delay 2 -o "/tmp/${PWSH_TGZ}" "$PWSH_URL"; then
+            # Extracted into a clean directory: an in-place overwrite of an
+            # existing install can leave stale files from a previous version
+            # behind, and pwsh loads assemblies from this tree by name.
+            rm -rf "$PWSH_DIR"
+            mkdir -p "$PWSH_DIR"
+            if tar -xzf "/tmp/${PWSH_TGZ}" -C "$PWSH_DIR"; then
+                chmod +x "${PWSH_DIR}/pwsh"
+                ln -sf "${PWSH_DIR}/pwsh" "${LOCAL_BIN}/pwsh"
+                rm -f "/tmp/${PWSH_TGZ}"
+                if "${LOCAL_BIN}/pwsh" --version >/dev/null 2>&1; then
+                    echo "Installed pwsh ($("${LOCAL_BIN}/pwsh" --version)) -> ${LOCAL_BIN}/pwsh"
+                else
+                    # The usual cause is a missing native dependency -- the
+                    # tarball is self-contained for .NET but still links
+                    # against system libicu and libssl, which a minimal or
+                    # container image may not carry.
+                    warn "pwsh was extracted but will not run. This is usually a missing native library (libicu and libssl are the common ones). Install your distribution's ICU and OpenSSL packages and try '${LOCAL_BIN}/pwsh --version' again."
+                fi
+            else
+                warn "Could not extract ${PWSH_TGZ}. Nothing in this pipeline can run without pwsh."
+                rm -f "/tmp/${PWSH_TGZ}"
+            fi
+        else
+            warn "PowerShell download failed from ${PWSH_URL}. Nothing in this pipeline can run without pwsh. Retry that URL by hand, extract it to ${PWSH_DIR}, and symlink ${PWSH_DIR}/pwsh into ${LOCAL_BIN}."
         fi
     fi
 fi
@@ -464,9 +692,16 @@ else
             break
         fi
     done
+    # Second signal: a desktop session directory exists. Replaces the previous
+    # `dpkg -s ubuntu-desktop` metapackage check, which could only ever answer
+    # for Debian-family systems -- Fedora, Arch and openSUSE have no such
+    # metapackage names, so on those it silently contributed nothing.
+    # /usr/share/xsessions (X11) and /usr/share/wayland-sessions are written
+    # by every desktop environment's own packaging on every distribution, so
+    # this is both more portable AND more accurate than naming metapackages.
     if [ "$HAS_DESKTOP" -eq 0 ]; then
-        for gui_pkg in ubuntu-desktop ubuntu-desktop-minimal kubuntu-desktop xubuntu-desktop; do
-            if dpkg -s "$gui_pkg" >/dev/null 2>&1; then
+        for session_dir in /usr/share/xsessions /usr/share/wayland-sessions; do
+            if [ -d "$session_dir" ] && [ -n "$(ls -A "$session_dir" 2>/dev/null)" ]; then
                 HAS_DESKTOP=1
                 break
             fi
@@ -518,8 +753,8 @@ else
     #   gnome-sushi -- spacebar preview in Nautilus: works on the images,
     #     on the videos, and on the .vtt subtitle files as plain text,
     #     without opening a separate application for each.
-    if ! sudo apt install -y webp-pixbuf-loader ffmpegthumbnailer gnome-sushi; then
-        warn "Thumbnailer install failed. Thumbnails (especially the original .webp) may show as generic icons in the file manager. Retry with: sudo apt install -y webp-pixbuf-loader ffmpegthumbnailer gnome-sushi"
+    if ! pkg_install "$PKGS_THUMB"; then
+        warn "Thumbnailer install failed. Thumbnails (especially the original .webp) may show as generic icons in the file manager. Install these by hand to fix it: $PKGS_THUMB"
     fi
 
     # Players. Both handle the subtitles this pipeline produces two
@@ -528,8 +763,8 @@ else
     # the lightweight one; vlc is included as well because its subtitle
     # track menu is far more discoverable, and it auto-loads a sidecar
     # subtitle file sitting next to the video without being asked.
-    if ! sudo apt install -y mpv vlc; then
-        warn "Video player install failed -- you'll have no way to view subtitles rendered over the video from inside the VM. Retry with: sudo apt install -y mpv vlc"
+    if ! pkg_install "$PKGS_PLAYERS"; then
+        warn "Video player install failed -- you'll have no way to view subtitles rendered over the video on this machine. Install these by hand to fix it: $PKGS_PLAYERS"
     fi
 
     # Nautilus refuses to thumbnail files above a size cap, which defaults
@@ -706,7 +941,7 @@ fi
 # successfully installing it two steps earlier. ffmpeg/pwsh/git are
 # unaffected since those are installed onto a location already on PATH.
 log "Verifying installation"
-echo "platform: ${PLATFORM}"
+echo "platform: ${PLATFORM}$([ "$PLATFORM" = "linux" ] && echo " (${DISTRO_PRETTY:-unknown} -- family ${DISTRO_FAMILY}, package manager ${PKG:-none})")"
 echo "yt-dlp:  $(${LOCAL_BIN}/yt-dlp --version 2>/dev/null || echo 'NOT FOUND')"
 echo "ffmpeg:  $(ffmpeg -version 2>/dev/null | head -n1 || echo 'NOT FOUND')"
 echo "ffprobe: $(ffprobe -version 2>/dev/null | head -n1 || echo 'NOT FOUND (postprocess.ps1 needs this for the info.json re-embed)')"
@@ -760,8 +995,19 @@ if [ "$PLATFORM" = "macos" ]; then
 elif [ "$HAS_DESKTOP" -eq 1 ]; then
     echo "mpv:     $(mpv --version 2>/dev/null | head -n1 || echo 'NOT FOUND')"
     echo "vlc:     $(vlc --version 2>/dev/null | head -n1 || echo 'NOT FOUND')"
-    echo "webp:    $(dpkg -s webp-pixbuf-loader >/dev/null 2>&1 && echo 'webp-pixbuf-loader installed (.webp thumbnails will render)' || echo 'NOT FOUND')"
-    echo "vidthumb: $([ -f /usr/share/thumbnailers/ffmpegthumbnailer.thumbnailer ] && echo 'ffmpegthumbnailer installed (.mkv poster frames will render)' || echo 'NOT FOUND')"
+    # Checked by looking for the files these packages install rather than by
+    # querying a package database. `dpkg -s` only answers on Debian-family
+    # systems, and adding rpm/pacman/zypper equivalents would mean three more
+    # branches to test what is ultimately one question: is the loader present
+    # on disk. The webp pixbuf loader and the .thumbnailer entry land in the
+    # same locations on every distribution, so a glob is both shorter and more
+    # portable. The glob on the pixbuf path covers the architecture triplet
+    # in the directory name, which differs per distro and per arch.
+    echo "webp:    $(ls /usr/lib*/gdk-pixbuf-2.0/*/loaders/libpixbufloader-webp.so \
+                        /usr/lib/*/gdk-pixbuf-2.0/*/loaders/libpixbufloader-webp.so 2>/dev/null | head -n1 >/dev/null \
+                     && echo 'webp-pixbuf-loader installed (.webp thumbnails will render)' || echo 'NOT FOUND')"
+    echo "vidthumb: $(ls /usr/share/thumbnailers/ffmpegthumbnailer.thumbnailer 2>/dev/null >/dev/null \
+                     && echo 'ffmpegthumbnailer installed (.mkv poster frames will render)' || echo 'NOT FOUND')"
 else
     echo "previews: skipped (no desktop environment detected)"
 fi

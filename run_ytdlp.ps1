@@ -350,28 +350,94 @@ if ($needsDependencyCheck) {
             "  [brew check] Could not query Homebrew's outdated list: $($_.Exception.Message)" | Tee-Object -FilePath $logFile -Append
         }
     } else {
-        # On Ubuntu both are normally managed by apt, so this checks apt's
-        # own upgradable-package list rather than comparing against upstream
-        # release numbers, which wouldn't line up with Ubuntu's (older,
-        # distro-patched) package versions anyway.
-        # NOTE: this reads apt's existing local cache -- it does not run
-        # "apt update" itself, since that needs root and a background
-        # video-download script silently invoking sudo is not something to
-        # do unattended. Run "sudo apt update" yourself periodically for
-        # this check to stay accurate.
-        $aptUpgradable = $null
+        # --- Linux: ask whichever package manager this distribution uses ---
+        # This used to assume apt outright. It degraded safely elsewhere (a
+        # missing `apt` throws CommandNotFoundException, the catch logs it and
+        # the block below is skipped), but it meant a Fedora or Arch user
+        # simply never got told an ffmpeg update was waiting.
+        #
+        # The family is read from /etc/os-release the same way setup.sh reads
+        # it, including the ID_LIKE fallback that makes derivatives -- Mint,
+        # Pop!_OS, Manjaro, Rocky -- resolve to their parent family without
+        # being named.
+        #
+        # In every case this reads the package manager's EXISTING local cache
+        # and never refreshes it: refreshing needs root, and a background
+        # video-download script silently invoking sudo is not something to do
+        # unattended. Refresh it yourself periodically for this to stay
+        # accurate.
+        $distroFamily = "unknown"
         try {
-            $aptUpgradable = & apt list --upgradable 2>$null
+            if (Test-Path "/etc/os-release") {
+                $osRelease = Get-Content "/etc/os-release" -Raw
+                $distroId     = if ($osRelease -match '(?m)^ID=("?)(.*?)\1\s*$')      { $Matches[2] } else { "" }
+                $distroIdLike = if ($osRelease -match '(?m)^ID_LIKE=("?)(.*?)\1\s*$') { $Matches[2] } else { "" }
+                # Padded with spaces so the -like patterns below test whole
+                # words against the space-separated ID_LIKE list, exactly as
+                # setup.sh's case patterns do.
+                $idHaystack = " $distroId $distroIdLike "
+                if     ($idHaystack -like "* debian *" -or $idHaystack -like "* ubuntu *") { $distroFamily = "debian" }
+                elseif ($idHaystack -like "* fedora *" -or $idHaystack -like "* rhel *" -or $idHaystack -like "* centos *") { $distroFamily = "fedora" }
+                elseif ($idHaystack -like "* arch *")   { $distroFamily = "arch" }
+                elseif ($idHaystack -like "* suse *" -or $idHaystack -like "* opensuse *" -or $distroId -like "opensuse*") { $distroFamily = "suse" }
+            }
         } catch {
-            "  [apt check] Could not query apt's upgradable-package list: $($_.Exception.Message)" | Tee-Object -FilePath $logFile -Append
+            "  [distro check] Could not read /etc/os-release: $($_.Exception.Message)" | Tee-Object -FilePath $logFile -Append
         }
-        if ($aptUpgradable) {
-            if ($aptUpgradable -match '^powershell/') {
-                "  WARNING: an apt update is available for powershell. Update at a natural stopping point with: sudo apt update && sudo apt install --only-upgrade powershell" | Tee-Object -FilePath $logFile -Append
+
+        # pwsh is installed from Microsoft's tarball into $HOME/.local by
+        # setup.sh, NOT from any distro package (see that script's Step 4 for
+        # why). No package manager knows about it, so asking one whether an
+        # update is available would always answer no. Compared against the
+        # newest published release instead -- via GitHub's /releases/latest
+        # redirect rather than its API, which is rate-limited per IP for
+        # unauthenticated callers and fails unpredictably on shared networks.
+        try {
+            $latestUrl = (Invoke-WebRequest -Uri "https://github.com/PowerShell/PowerShell/releases/latest" -MaximumRedirection 5 -ErrorAction Stop).BaseResponse.RequestMessage.RequestUri.AbsoluteUri
+            if ($latestUrl -match '/tag/v(.+)$') {
+                $latestPwsh = $Matches[1]
+                $currentPwsh = $PSVersionTable.PSVersion.ToString()
+                if ($latestPwsh -and ($currentPwsh -ne $latestPwsh)) {
+                    "  WARNING: pwsh $currentPwsh is running; $latestPwsh is the latest release. It was installed from a tarball rather than a package, so nothing updates it for you -- re-run setup.sh at a natural stopping point to pick up the new version." | Tee-Object -FilePath $logFile -Append
+                }
             }
-            if ($aptUpgradable -match '^ffmpeg/') {
-                "  WARNING: an apt update is available for ffmpeg. Update at a natural stopping point with: sudo apt update && sudo apt install --only-upgrade ffmpeg" | Tee-Object -FilePath $logFile -Append
+        } catch {
+            "  [pwsh check] Could not reach GitHub to check the latest PowerShell release: $($_.Exception.Message)" | Tee-Object -FilePath $logFile -Append
+        }
+
+        # ffmpeg IS a distro package on every supported family, so this asks
+        # the local package manager about it.
+        $ffmpegUpdateHint = $null
+        try {
+            switch ($distroFamily) {
+                "debian" {
+                    $upgradable = & apt list --upgradable 2>$null
+                    if ($upgradable -match '^ffmpeg/') { $ffmpegUpdateHint = "sudo apt update && sudo apt install --only-upgrade ffmpeg" }
+                }
+                "fedora" {
+                    # dnf exits 100 when updates ARE available, which is
+                    # documented behaviour rather than a failure -- so the
+                    # exit code is deliberately not inspected here, only the
+                    # output.
+                    $upgradable = & dnf check-update ffmpeg 2>$null
+                    if ($upgradable -match '(?m)^ffmpeg\s') { $ffmpegUpdateHint = "sudo dnf upgrade ffmpeg" }
+                }
+                "arch" {
+                    # -Qu lists installed packages with a newer version in the
+                    # local sync database. Queries only; touches nothing.
+                    $upgradable = & pacman -Qu 2>$null
+                    if ($upgradable -match '(?m)^ffmpeg\s') { $ffmpegUpdateHint = "sudo pacman -Syu" }
+                }
+                "suse" {
+                    $upgradable = & zypper --non-interactive list-updates 2>$null
+                    if ($upgradable -match '(?m)\|\s*ffmpeg') { $ffmpegUpdateHint = "sudo zypper update ffmpeg" }
+                }
             }
+        } catch {
+            "  [$distroFamily check] Could not query the package manager for updates: $($_.Exception.Message)" | Tee-Object -FilePath $logFile -Append
+        }
+        if ($ffmpegUpdateHint) {
+            "  WARNING: a package update is available for ffmpeg. Update at a natural stopping point with: $ffmpegUpdateHint" | Tee-Object -FilePath $logFile -Append
         }
     }
 

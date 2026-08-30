@@ -33,30 +33,66 @@ nothing below depends on your username.
 
 ## A note on distributions
 
-`setup.sh` assumes **apt** (Ubuntu and Debian). That is a much safer bet
-inside a purpose-built VM than it is on bare metal, where you may well be on
-Fedora, Arch, openSUSE or something else. If you are not on an apt system, the
-script's package steps will fail and warn, but **the steps that actually place
-the pipeline still run** — folder creation, file placement, the `ytdl` and
+`setup.sh` supports four distribution families natively, which between them
+cover the overwhelming majority of desktop and server Linux:
+
+| Family | Package manager | Includes |
+|---|---|---|
+| `debian` | apt | Debian, Ubuntu, Mint, Pop!\_OS, Raspberry Pi OS |
+| `fedora` | dnf | Fedora, RHEL, CentOS Stream, Rocky, AlmaLinux |
+| `arch` | pacman | Arch, Manjaro, EndeavourOS |
+| `suse` | zypper | openSUSE Tumbleweed, openSUSE Leap, SLES |
+
+Detection reads `ID` and then `ID_LIKE` from `/etc/os-release`. `ID_LIKE` is
+why the derivatives come along for free — Mint declares `ID_LIKE=ubuntu`,
+Manjaro `arch`, Rocky `rhel centos fedora` — so none of them are named
+anywhere in the script.
+
+**On a distribution outside those families** the script says so plainly and
+keeps going. The package steps are skipped, but **everything that places the
+pipeline still runs**: folder creation, file placement, the `ytdl` and
 `ytdl-view` launchers, and `PATH` wiring are all package-manager-agnostic. So
-you can install the dependencies by hand and then run `setup.sh` to do the
-rest.
+on NixOS, Gentoo, Alpine or anything else, install the dependencies however
+your system does it and let `setup.sh` do the rest.
 
-Rough equivalents for the packages it installs:
+### PowerShell is no longer a distro problem
 
-| Need | Debian/Ubuntu | Fedora | Arch |
-|---|---|---|---|
-| ffmpeg + ffprobe | `ffmpeg` | `ffmpeg` (needs RPM Fusion) | `ffmpeg` |
-| basics | `curl wget git ca-certificates python3-pip` | `curl wget git python3-pip` | `curl wget git python-pip` |
-| PowerShell 7 | Microsoft apt repo, or `snap install powershell --classic` | Microsoft yum repo | AUR `powershell-bin` |
-| thumbnailers | `webp-pixbuf-loader ffmpegthumbnailer gnome-sushi` | `webp-pixbuf-loader ffmpegthumbnailer sushi` | `webp-pixbuf-loader ffmpegthumbnailer sushi` |
-| players | `mpv vlc` | `mpv vlc` | `mpv vlc` |
+It used to be the one genuinely awkward dependency: Microsoft publishes
+repositories for only a handful of distributions, Arch has just an AUR package
+that cannot be installed non-interactively, and there was no Ubuntu 26.04
+package for a long stretch.
 
-PowerShell is the one genuinely awkward dependency off Debian/Ubuntu.
-Microsoft ships packages for a limited set of distributions; the snap
-(`snap install powershell --classic`) is the most portable fallback and is
-what `setup.sh` already falls back to on Ubuntu releases Microsoft has not
-published for.
+`setup.sh` now installs Microsoft's **self-contained tarball** into
+`~/.local/share/powershell` and symlinks `pwsh` into `~/.local/bin` — no root,
+no repository added to your system, one code path on every glibc distribution.
+It is the same approach the script already uses for `yt-dlp` and `deno`, both
+of which live in `~/.local/bin` for the same reason.
+
+Two consequences worth knowing:
+
+- **Nothing updates it for you.** A package-managed install would ride your
+  system's upgrade cycle; this one will not. `run_ytdlp.ps1`'s daily
+  dependency check compares your running version against the newest published
+  release and tells you to re-run `setup.sh` when you are behind.
+- **It is not small** — roughly 176 MB extracted, since it bundles its own
+  .NET runtime. That is the price of not depending on your distribution
+  shipping one.
+
+If `pwsh` extracts but will not run, the cause is almost always a missing
+native library — `libicu` and `libssl` are the usual suspects, since the
+tarball is self-contained for .NET but still links against those. Install your
+distribution's ICU and OpenSSL packages.
+
+### ffmpeg on Fedora and openSUSE
+
+The one package that is still awkward. Both ship ffmpeg only through a
+third-party repository for patent reasons — RPM Fusion on Fedora, Packman on
+openSUSE. `setup.sh` deliberately **does not** enable those automatically:
+adding a third-party package source is a lasting, system-wide change
+affecting every future update on the machine, which is not a reasonable thing
+for a video-archiver installer to decide unattended. If `ffmpeg` is missing
+after the base install, the script warns with the exact command for your
+distribution. Run it, then re-run `setup.sh`.
 
 ---
 
