@@ -315,7 +315,20 @@ if ($Workers -le 1) {
     # playlist/channel sessions (where "how many of the 80 videos in this
     # channel were actually new" isn't obvious from scrolling the log); for
     # a single video it'll just read "1 video touched, 0 already archived".
-    $videosTouched   = @($sessionOutput | Select-String -Pattern '^\[youtube\] [\w-]{6,}: Downloading').Count
+    # Counted by DISTINCT video id, NOT by counting matching lines.
+    # yt-dlp prints SEVERAL "[youtube] <id>: Downloading ..." lines for a
+    # single video -- webpage, player API JSON, m3u8 information, and so
+    # on -- so a plain line count reported "3 video(s) touched" for a
+    # one-video run (confirmed in a real download.log: three such lines,
+    # all for the same id). It isn't a fixed multiplier that could just be
+    # divided out, either: how many of those lines appear depends on which
+    # client/extraction path yt-dlp happens to take that run. The id is
+    # captured from each match and de-duplicated instead, which is exactly
+    # one entry per video no matter how chatty extraction was.
+    $videosTouched   = @($sessionOutput |
+        Select-String -Pattern '^\[youtube\] ([\w-]{6,}): Downloading' |
+        ForEach-Object { $_.Matches[0].Groups[1].Value } |
+        Sort-Object -Unique).Count
     $archiveSkipped  = @($sessionOutput | Select-String -Pattern 'has already been recorded in the archive').Count
     $sessionErrors   = @($sessionOutput | Select-String -Pattern '^ERROR:').Count
     $sessionWarnings = @($sessionOutput | Select-String -Pattern '^WARNING:').Count
