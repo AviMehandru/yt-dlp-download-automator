@@ -363,6 +363,45 @@ try {
             # working the whole time. Logging each line AS it streams
             # (while still building $commentsOutput for the warning-count
             # check below) fixes that with no change in end behavior.
+            # --- Why --sleep-requests is 0.25 here and not 2 ---
+            # This single number used to dominate the entire runtime of a
+            # download. yt-dlp's comment extractor (_comment_entries in
+            # yt_dlp/extractor/youtube/_video.py) does NOT fetch comments in
+            # bulk: top-level comments arrive ~20 per continuation request,
+            # but EVERY thread with paginated replies costs its own separate
+            # HTTP request, because the extractor recurses into
+            # _comment_entries(..., parent=comment_id) once per thread. So on
+            # a reply-heavy video the request count tracks the number of
+            # THREADS, not comments/20 -- a 2,000-comment video with ~1,200
+            # reply-bearing threads is ~1,260 requests, not ~100.
+            #
+            # --sleep-requests then fires before EVERY ONE of those, inside
+            # InfoExtractor._request_webpage (yt_dlp/extractor/common.py). At
+            # the old value of 2 that was ~1,260 x (2s sleep + ~0.5s real
+            # latency) = ~52 minutes, of which roughly 80% was this process
+            # sleeping on purpose. A 35,000-comment video worked out to
+            # ~22,000 requests and 15+ hours, which matched a real overnight
+            # run that was still going after 14.
+            #
+            # 2 was never a YouTube requirement -- yt-dlp's own default is 0.
+            # The comment endpoint is an unauthenticated InnerTube `next`
+            # POST, considerably cheaper to serve than the player endpoint the
+            # main download pass hits, so it tolerates far more than this.
+            # 0.25 keeps a real (if small) gap between requests and still cuts
+            # the comments pass by roughly 4-5x.
+            #
+            # NOTE: the --sleep-requests 2 in config/yt-dlp.conf is deliberately
+            # left ALONE. That one governs the MAIN download pass, which makes
+            # only a handful of extraction requests (player, formats, subs) and
+            # whose reliability is worth far more than the couple of seconds
+            # lowering it would save. This pass sets --ignore-config, so the two
+            # values are genuinely independent -- do not "fix" the mismatch.
+            #
+            # If this ever needs raising again, the tell is the throttle check
+            # below, not a hunch: watch for retry/incomplete-data lines, and for
+            # the seconds-per-request figure logged at the end of this pass
+            # drifting well above the sleep value.
+            $commentsSw = [System.Diagnostics.Stopwatch]::StartNew()
             $commentsOutput = & yt-dlp `
                 --ignore-config `
                 --skip-download `
@@ -370,14 +409,54 @@ try {
                 --write-info-json `
                 --extractor-retries 100 `
                 --retry-sleep "extractor:exp=1:30:2" `
-                --sleep-requests 2 `
+                --sleep-requests 0.25 `
                 -o (Join-Path $commentsTempDir "comments.%(ext)s") `
                 $originalUrl 2>&1 | ForEach-Object {
                     Log "  [comments] $_"
                     $_
                 }
+            $commentsSw.Stop()
 
-            $commentIssues = $commentsOutput | Where-Object { $_ -match '(?i)(warn|error|unable|fail)' }
+            # --- Throttle / pacing telemetry ---
+            # Counts the extractor's own per-request progress lines, so the
+            # cost of this pass is recorded in real numbers rather than
+            # guessed at afterwards. Seconds-per-request is the useful one: it
+            # should sit a little above --sleep-requests above. If it climbs
+            # well beyond that, YouTube is making requests wait (or the retry
+            # backoff is firing), which means the sleep value is no longer what
+            # sets the pace -- and raising it further would not help.
+            # NOTE the '\[comments\]' anchor in all three filters below, and do
+            # not remove it. Log() ends in Write-Output (so its lines bubble up
+            # to the console and download.log via the launcher), which means
+            # that inside the ForEach-Object above, BOTH the timestamped
+            # "  [comments] <line>" copy AND the bare $_ get collected into
+            # $commentsOutput. Every yt-dlp line is therefore in there exactly
+            # twice, and an unanchored -match counts all of them twice: request
+            # counts double, and seconds-per-request comes out at half its true
+            # value. Anchoring on the prefix that only Log() adds picks exactly
+            # one copy per real line. (This also guarantees a string to match
+            # against -- 2>&1 puts ErrorRecord objects, not strings, into the
+            # bare copies.) $commentIssues below had this bug too: its counts
+            # were 2x reality for as long as the streaming-log change has been in.
+            $commentRequests = @($commentsOutput | Where-Object { $_ -match '\[comments\].*Downloading comment.*API JSON' }).Count
+            $commentsElapsed = $commentsSw.Elapsed.TotalSeconds
+            if ($commentRequests -gt 0) {
+                $secsPerReq = [math]::Round($commentsElapsed / $commentRequests, 2)
+                Log ("Comments pass: {0} API request(s) in {1:N0}s ({2}s/request, --sleep-requests 0.25)." -f $commentRequests, $commentsElapsed, $secsPerReq)
+            } else {
+                Log ("Comments pass finished in {0:N0}s (no comment API requests detected)." -f $commentsElapsed)
+            }
+
+            # Retries and incomplete-data warnings are the actual signature of
+            # YouTube pushing back; plain "warning" lines are not (a subtitle
+            # 404 and similar land in the same bucket as a throttle otherwise).
+            # Called out separately so real pushback is not lost in the noise.
+            $throttleSignals = @($commentsOutput | Where-Object { $_ -match '(?i)\[comments\].*(incomplete data|retrying|too many requests|429|rate.?limit)' })
+            if ($throttleSignals.Count -gt 0) {
+                Log "WARNING: $($throttleSignals.Count) retry/throttle signal(s) during the comments pass -- if this recurs, raise --sleep-requests in postprocess.ps1 back toward 1."
+            }
+
+            $commentIssues = $commentsOutput | Where-Object { $_ -match '(?i)\[comments\].*(warn|error|unable|fail)' }
             if ($commentIssues) {
                 Log "WARNING: $($commentIssues.Count) issue(s) during the comments pass (see [comments] lines above)."
             }
