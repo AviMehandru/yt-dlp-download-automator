@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# POSIX launcher shim for the yt-dlp archival pipeline (Linux and macOS).
+#
+# THIS FILE DELIBERATELY CONTAINS NO ARGUMENT PARSING. It used to carry a
+# full bash reimplementation of the same seven options ytdl.ps1 parses --
+# --sync, --items, --after, --lazy, --workers, --path, plus the legacy
+# positional path -- which meant every new flag had to be added, and every
+# validation message worded, in two languages that could silently drift
+# apart. Since pwsh is already a hard requirement for the pipeline itself
+# (run_ytdlp.ps1 and postprocess.ps1 are PowerShell and there is no
+# non-pwsh path through a download), a bash parser bought nothing except a
+# second place to make a mistake.
+#
+# So this is now the exact POSIX counterpart of ytdl.cmd: locate ytdl.ps1,
+# hand it the command line untouched, propagate its exit code. All the
+# real work -- option parsing, validation, building the run_ytdlp.ps1
+# invocation -- lives once, in scripts/ytdl.ps1, and is therefore
+# identical on all three platforms by construction rather than by
+# discipline.
+#
+# For what the options actually do, run `ytdl` with no arguments, or read
+# the comment block at the top of ytdl.ps1.
+#
+# "$@" (quoted) is what makes a URL containing "=" and a path containing
+# spaces both survive: bash expands it to one shell word per original
+# argument, with no re-splitting. Unlike cmd.exe there is no "=" quirk to
+# work around here -- see ytdl.cmd for why the Windows shim needs %*.
+#
+# YTDLP_INSTALL_ROOT is honored here for the same reason ytdl.cmd and
+# run_ytdlp.ps1 honor it: a non-default install location is set in one
+# place. This tiny bit of path logic is the only thing that cannot move
+# into ytdl.ps1, since it is what finds ytdl.ps1 in the first place.
+INSTALL_ROOT="${YTDLP_INSTALL_ROOT:-${HOME}/yt-dlp}"
+LAUNCHER="${INSTALL_ROOT}/scripts/ytdl.ps1"
+
+if [ ! -f "$LAUNCHER" ]; then
+    echo "Error: launcher not found at ${LAUNCHER}" >&2
+    echo "Re-run setup.sh, or set YTDLP_INSTALL_ROOT if the pipeline is installed elsewhere." >&2
+    exit 1
+fi
+
+if ! command -v pwsh >/dev/null 2>&1; then
+    echo "Error: pwsh (PowerShell 7) is not on PATH, and nothing in this pipeline can run without it." >&2
+    echo "Re-run setup.sh to install it." >&2
+    exit 1
+fi
+
+exec pwsh -NoProfile -File "$LAUNCHER" "$@"

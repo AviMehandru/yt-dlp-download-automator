@@ -2,8 +2,12 @@
 REM Thin cmd.exe shim so `ytdl <url> [options]` works from a plain Command
 REM Prompt, from the Run box, and from anything that shells out via cmd --
 REM all of which cannot execute a .ps1 file directly. Every bit of the
-REM actual argument parsing lives in ytdl.ps1 next to this file; this
-REM exists only to hand the command line over to it.
+REM actual argument parsing lives in ytdl.ps1 -- one file, shared with the
+REM POSIX `ytdl` shim, so the command line is parsed identically on every
+REM platform. This exists only to hand it over. Note ytdl.ps1 is NOT next
+REM to this file once installed: this shim goes on PATH in %USERPROFILE%
+REM \.local\bin, while ytdl.ps1 lives with the other scripts under the
+REM install root, which is why the path below is built rather than assumed.
 REM
 REM %* (not %1 %2 %3...) is what makes a URL containing "=" work. cmd.exe
 REM treats "=" as an argument delimiter alongside spaces when it splits the
