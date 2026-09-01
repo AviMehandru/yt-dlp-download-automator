@@ -1,10 +1,11 @@
 # The test suite — design notes
 
-*Commit 1 of 2. Written against `7642007`, before the comment-completeness
-audit landed. Commit 2 covers the audit.*
+*Commit 2 of 2. Current as of `450737c` (the comment-completeness audit).
+Supersedes the commit 1 notes; the differences are listed under
+"What changed in this commit" at the end.*
 
-Added `tests/` to the repo. One command, all three platforms, ~95 tests,
-about two minutes, no network and no YouTube.
+`tests/` in the repo. One command, all three platforms, 118 tests, about two
+and a half minutes, no network and no YouTube.
 
 ```bash
 ./tests/run-tests            # Linux, macOS
@@ -27,17 +28,18 @@ tests/
   run-tests           run-tests.cmd        run-tests.ps1
   lib/  Harness.ps1   Fixtures.ps1   Report.ps1
   suites/  010-syntax  020-launcher  030-config  040-run-ytdlp
-           050-postprocess  060-locking  070-installer  080-viewer  090-live
+           050-postprocess  055-comment-audit  060-locking
+           070-installer  080-viewer  090-live
 ```
 
-## Three decisions worth recording
+## Four decisions worth recording
 
 **Not Pester.** The obvious choice, rejected for the same reason this repo
 has no package manifest: it makes "can I run the tests" depend on a module
 install succeeding on Windows, macOS and four Linux families before a single
 assertion runs. This suite is what you reach for when you are *not sure the
 environment is right* — it cannot itself be the part that fails to install.
-The framework is ~270 lines of stock pwsh 7, which the pipeline already
+The framework is ~280 lines of stock pwsh 7, which the pipeline already
 requires.
 
 **yt-dlp is stubbed, ffmpeg is not.** The stub records every invocation,
@@ -51,7 +53,21 @@ are absent, tests skip rather than fail.
 
 The stub itself is the repo's own launcher pattern reused — one PowerShell
 body behind an extensionless shim and a `.cmd` shim, because a native
-command lookup finds the first on Unix and the second on Windows.
+command lookup finds the first on Unix and the second on Windows. It lives
+in `lib/Fixtures.ps1` as `New-YtDlpStub` and answers **all three** yt-dlp
+calls postprocess makes, because a suite stubbing only the call it cares
+about would let the other two reach a real yt-dlp pointed at YouTube.
+
+**Blocks that cannot be reached from outside are extracted, not re-typed.**
+The audit's API cross-check calls `Invoke-RestMethod`, which no PATH stub can
+intercept. `Get-ScriptRegion` pulls that block out of the **shipped** file by
+its comment markers and runs it with a shadowing function, so 403s, 400s,
+missing counts and shortfall arithmetic are all reachable with no key, no
+quota and no network. A copy of the block living in a test file would drift
+within a release or two, and then the tests pass against code that no longer
+runs anywhere. The markers are the cost: `Get-ScriptRegion` fails with a
+specific message naming the marker it could not find, rather than silently
+testing an empty string.
 
 **Skips are not failures.** A missing optional dependency reports SKIP with
 a reason. A suite that cries wolf about an optional tool is a suite you learn
@@ -85,19 +101,21 @@ thing that should be true:
 | `--exec` firing for `--keep-video` pre-merge streams | a pre-merge stream writes no manifest and never reaches Final Video |
 | Lost manifest updates under `-Workers` | six real concurrent processes across two channels lose nothing |
 | `$rest` unrolling to a bare string | `ytdl <url> /some/path` with exactly one extra argument |
+| `@($null)` yielding a one-element array in the audit | a video with no comments audits as 0 merged, not 1 |
 
 Plus invariants that previously lived only in comments: the `-o` template
 directory depth, the config-is-static rule, `setup.ps1` staying 5.1-compatible
 (checked against the syntax tree, so a `?` in a string cannot false-alarm),
 step-count agreement across all three installer halves, `$ProjectFiles` ↔
 `Install-ProjectFile` coverage, the launcher shims containing no argument
-parsing, and the viewer's read-only and no-path-routes guarantees.
+parsing, the audit asking for exactly one quota unit, and the viewer's
+read-only and no-path-routes guarantees.
 
 ## The suite was itself tested
 
-Eleven deliberate regressions were introduced into the pipeline one at a
+Twenty deliberate regressions were introduced into the pipeline one at a
 time; each was caught by the test that should have caught it. That exercise
-changed one test and found one harness bug:
+changed two tests and found one harness bug:
 
 - **The lost-update check now pre-seeds `global_manifest.json` with 300
   entries.** Against an empty manifest the read-modify-write finishes in
@@ -105,6 +123,13 @@ changed one test and found one harness bug:
   luck — removing the lock did *not* reliably fail the test. A real archive
   has hundreds of entries there anyway, so the fixture is more faithful for
   it. With the seed, lock removal fails 3/3.
+- **The key-redaction test was passing for the wrong reason.** The typed 403
+  and 400 branches log *fixed* strings that never include the exception
+  message, so deleting the redaction left them green. Only the generic branch
+  logs `$auditMsg` verbatim. The test now drives a transport failure whose
+  message carries the request URI — the shape that actually leaks — and
+  additionally asserts that the underlying cause survives redaction, so a
+  future "fix" that blanks the whole message also fails.
 - **The stub's call log needed `FileShare.None`, not `FileShare.Read`.** On
   Unix, .NET implements `FileShare` with `flock`, and anything short of
   `None` maps to a *shared* lock — so two concurrent stubs both acquired it,
@@ -114,6 +139,11 @@ changed one test and found one harness bug:
   intermittent "expected 3 downloads, found 2" in the `-Workers` tests about
   one run in five. Worth knowing generally: `FileShare.Read` is not mutual
   exclusion on Unix.
+
+The lesson from the second one generalises: a test that asserts an absence
+(no key in the log, no file in the archive, no warning printed) can pass
+because the code is right *or* because the test never reached the code path
+that would be wrong. Mutation is the only cheap way to tell those apart.
 
 ## `-Live` and the comments cap
 
@@ -131,36 +161,62 @@ The live run leaves its archive in the temp directory and prints the path.
 ## Verification status of the suite itself
 
 Written and run against **Linux** (Ubuntu 24.04, pwsh 7.4.6, ffmpeg 6.1,
-python 3.11): 94 passed, 1 skipped (the opt-in live suite), stable across
+python 3.11): 117 passed, 1 skipped (the opt-in live suite), stable across
 repeated runs. The macOS and Windows branches are statically checked only —
 same caveat the pipeline itself carries. The suite is built to run there
 unmodified; the first runs on macOS 26 and Windows 11 are the real test of
 that, and any failure they surface is as likely to be in the harness as in
 the pipeline.
 
-## Two things found while writing it
+## What changed in this commit
 
-**1. The comment-completeness audit is not in the repo.**
-`claude/comment-fetch-performance.md` documents a post-merge audit block in
-`postprocess.ps1` — `comment_audit` in `manifest.json`, `duplicate_ids` /
-`orphan_replies` / `pinned_count`, the `videos.list?part=statistics`
-cross-check, `YTDLP_YOUTUBE_API_KEY`, `YTDLP_COMMENT_AUDIT_TOLERANCE`, the
-key-redaction rule. None of it exists in `main` as of `7642007`; the only
-change in that commit was `--sleep-requests 2 → 0.25`. Either the audit was
-never committed or the doc got ahead of the code. No tests were written for
-it. If it lands, it wants roughly six: the three local invariants, the
-tolerance boundary, the missing-key path, and a check that a 400 carrying
-the key in its message is redacted before logging.
+Against commit 1, which predates the comment audit:
 
-*(It landed in `450737c`. That is what commit 2 covers.)*
+- **`suites/055-comment-audit.tests.ps1` is new** — 23 tests over the audit
+  block added in `450737c`, in two halves. The local invariants run against
+  the real `postprocess.ps1` with no API key, which is also the common
+  production case. Every API cross-check branch runs from the block extracted
+  out of the shipped file with `Invoke-RestMethod` shadowed.
+- **`lib/Fixtures.ps1` gained `New-YtDlpStub` and `Get-ScriptRegion`.** The
+  first is the three-call stub, moved out of `050-postprocess` so both suites
+  share one copy and neither can accidentally reach a real yt-dlp; it also
+  gained `YTDLP_TEST_COMMENT_SET` for producing duplicate / orphaned /
+  double-pinned comment sets. The second is the block extractor described
+  above.
+- **`suites/050-postprocess.tests.ps1` lost its inline stub** and calls
+  `New-YtDlpStub` instead. No test in it changed.
+- **The existing 94 tests passed unchanged against `450737c`**, which is
+  worth recording on its own: adding the audit disturbed neither the comments
+  pass, nor the manifest shape, nor anything downstream of either.
+- Nine further mutations were run against the new suite, which is what caught
+  the key-redaction test passing for the wrong reason.
 
-**2. The viewer picks a pre-merge stream if `postprocess.ps1` has not run.**
+## Open findings
+
+**The viewer picks a pre-merge stream if `postprocess.ps1` has not run.**
 `archive-viewer.py` chooses the video with
 `"pre-merge" not in f["folder"].lower()` — a folder-name test only. In a
-folder where the streams are still in `Final files/` (postprocess crashed,
-or the archive predates the relocation), a video-only `Final Video.f248.webm`
+folder where the streams are still in `Final files/` (postprocess crashed, or
+the archive predates the relocation), a video-only `Final Video.f248.webm`
 sorts first and gets served as the video: no audio, no error. Adding a
 filename check for yt-dlp's `Final Video.f<id>.<ext>` pattern alongside the
-folder check closes it. Low severity — the window is normally seconds — but
-it is a one-line fix and the test fixture for it already exists
+folder check closes it. Low severity — the window is normally seconds — and
+the test fixture already exists
 (`New-VideoFolder -WithPreMergeStreams -PreMergeUnrelocated`).
+
+**A malformed sidecar `info.json` aborts post-processing outright.** The
+first read — `$info = Get-Content $infoJsonFile.FullName -Raw |
+ConvertFrom-Json`, near the top of `postprocess.ps1` — is not wrapped, and
+`$ErrorActionPreference` is `Stop`, so bad JSON throws straight to the outer
+catch. A *missing* info.json degrades gracefully (id/title/date are recovered
+from the folder name and the run continues); an *unreadable* one does not,
+even though `archive-viewer.py` already tolerates both. That video then gets
+no `checksums.sha256`, no `manifest.json`, no manifest entries and never
+reaches the Final Video repository, and re-running does not fix it. The
+realistic way in is an interrupted write of the sidecar itself — the comments
+merge rewrites that exact file, so a crash or a full disk mid-merge leaves
+truncated JSON behind. It fails loudly, which is much better than most of
+what this suite guards against, and it is rare. Current behaviour is pinned
+by *aborts loudly, and early, on an unparseable sidecar info.json* in
+`055-comment-audit`, which carries the replacement assertions in a comment
+for whenever the parse is made tolerant.

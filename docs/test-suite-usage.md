@@ -8,7 +8,7 @@ platforms, no dependencies to install first.
 tests\run-tests.cmd          # Windows
 ```
 
-Roughly 95 tests, about two minutes, no network and no YouTube. It writes a
+118 tests, about two and a half minutes, no network and no YouTube. It writes a
 pass/fail summary to the console and a self-contained HTML report to
 `tests/results/results.html`, and exits non-zero if anything failed.
 
@@ -54,6 +54,7 @@ Three side effects are worth naming because they are real:
 | `030-config` | `yt-dlp.conf` invariants: `CONFIG_VERSION`, the config-is-static rule, the removed options staying removed, `--ignore-config` on every extracting invocation, and the exact directory depth every `-o` template must produce. |
 | `040-run-ytdlp` | Folder self-heal, command-line construction, the archive-history snapshot, the once-a-day dependency throttle, distinct-id counting in the session summary, and the whole `-Workers` path including `--sync` truncation. |
 | `050-postprocess` | The per-video pipeline end to end against fabricated folders: the `.mkv` gate, pre-merge relocation, the comments pass and its telemetry, the info.json re-embed, `checksums.sha256`, both manifests, the Channel Info throttle, the Final Video sync, and the `_incomplete` sweep. |
+| `055-comment-audit` | The comment completeness audit: local invariants (duplicates, orphan replies, more than one pinned) run against the real `postprocess.ps1`, plus every API cross-check branch — shortfall arithmetic, tolerance, 403, 400, key redaction — run from the block extracted out of the shipped file with `Invoke-RestMethod` shadowed, so no key, quota or network is involved. |
 | `060-locking` | Six real concurrent `postprocess.ps1` processes across two channels, checking that no manifest update is lost. |
 | `070-installer` | Step-count agreement across all three halves, `$ProjectFiles` ↔ `Install-ProjectFile` coverage, the keep-going error handling, no `curl \| sh`, plus a real dry run of the shared half from a local checkout. |
 | `080-viewer` | `archive-viewer.py` started for real and driven over HTTP: routes, metadata, comments, the read-only invariant (before/after inventory of the whole archive), and nine path-traversal probes. |
@@ -113,11 +114,7 @@ Describe 'some component' {
         try {
             Install-PipelineInto -TestRoot $r -RepoRoot $script:RepoRoot
             Enable-Stubs -TestRoot $r
-            New-StubBinary -TestRoot $r -Name 'yt-dlp' -Behavior {
-                # $StubArgs holds what the pipeline passed.
-                Write-Output '2026.08.20'
-            } | Out-Null
-
+            New-YtDlpStub -TestRoot $r | Out-Null      # handles all three yt-dlp calls
 
             $video = New-VideoFolder -TestRoot $r -SeedChannelInfoThrottle
             $result = Invoke-Postprocess -TestRoot $r -FilePath $video.MkvPath
@@ -128,6 +125,21 @@ Describe 'some component' {
     }
 }
 ```
+
+Use `New-YtDlpStub` for anything that runs `postprocess.ps1`. It answers all
+three of the yt-dlp calls that script makes — the version query, the comments
+pass and the Channel Info refresh — because a stub that covers only the call
+you care about lets the other two fall through to whatever real yt-dlp is
+installed, which on your own machine is a real one pointed at YouTube. Its
+comment payload is steered by `YTDLP_TEST_COMMENT_SET`
+(`clean`/`dupes`/`orphans`/`twopinned`) and `YTDLP_TEST_COMMENT_EMPTY`.
+
+For a branch that cannot be reached from outside — a cmdlet call you need to
+fake, like the audit's `Invoke-RestMethod` — `Get-ScriptRegion` pulls one
+comment-delimited block out of the **shipped** file so it can be run with a
+shadowing function. Extracting rather than re-typing matters: a copy of the
+block in a test file drifts within a release or two, and then the tests pass
+against code that no longer runs anywhere.
 
 Two things about writing behaviour stubs. The scriptblock is serialised to a
 file, so it **cannot close over outer variables** — pass values in through
@@ -142,7 +154,7 @@ on machines you are not sitting at, and the message is the whole report.
 
 ## Does the suite actually catch anything?
 
-It was checked by mutation: eleven deliberate regressions were introduced
+It was checked by mutation: twenty deliberate regressions were introduced
 into the pipeline one at a time, and each was caught by the test that should
 have caught it.
 
@@ -159,8 +171,17 @@ have caught it.
 | A ternary added to `setup.ps1` | *setup.ps1 stays compatible with Windows PowerShell 5.1* |
 | `--ignore-config` dropped from the comments pass | *every extracting yt-dlp invocation passes --ignore-config* |
 | Pre-merge relocation removed | *moves pre-merge streams out of Final files …* |
+| `@($null)` guard removed from the audit's `merged_count` | *reports zero comments as zero, not one* |
+| API key redaction removed | *redacts the key from an untyped transport failure* |
+| `parent = "root"` no longer excluded from the orphan check | *does not count a top-level comment as an orphan* |
+| Negative shortfall clamp removed | *clamps a negative shortfall to zero* |
+| A second `part=` added to the API request | *asks only for the statistics part, which is one quota unit* |
+| Local invariants gated behind the API key | *runs the local invariants even when the API half is unavailable* |
+| Tolerance range validation removed | *honours YTDLP_COMMENT_AUDIT_TOLERANCE …* |
+| Duplicate-id check removed | *catches duplicate comment ids* |
+| `comment_audit` dropped from `manifest.json` | *records the audit in manifest.json …* |
 
-That exercise changed one test and found one bug in the harness itself:
+That exercise changed two tests and found one bug in the harness itself:
 
 - The lost-update check now pre-seeds `global_manifest.json` with 300
   entries. Against an empty manifest the read-modify-write finishes in
@@ -168,6 +189,11 @@ That exercise changed one test and found one bug in the harness itself:
   luck — lock removal did *not* reliably fail the test. A real archive has
   hundreds of entries there anyway, so the fixture is more faithful for it.
   With the seed, lock removal fails 3/3.
+- The key-redaction test was passing for the wrong reason. The typed 403 and
+  400 branches log **fixed** strings that never contain the exception
+  message, so deleting the redaction left them green; only the generic
+  branch logs the message verbatim. The test now drives a transport failure
+  whose message carries the request URI — the shape that actually leaks.
 - The stub's call log needed `FileShare.None`, not `FileShare.Read`. On Unix
   .NET implements `FileShare` with `flock`, and anything short of `None` maps
   to a **shared** lock, so two concurrent stubs both acquired it, both seeked

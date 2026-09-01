@@ -16,72 +16,16 @@
     true rather than the mistake that was made.
 #>
 
-# ---------------------------------------------------------------------
-# Stub behavior shared by most of the tests below.
-#
-# It is a single scriptblock rather than one per test because postprocess
-# makes three DIFFERENT yt-dlp calls (version query, comments pass, Channel
-# Info refresh) and a test that stubs only the one it cares about would let
-# the other two fall through to whatever real yt-dlp happens to be
-# installed -- which on a developer's own machine is a real one, pointed at
-# YouTube. Handling all three in one place keeps that impossible.
-# ---------------------------------------------------------------------
-$script:PostprocessStub = {
-    if ($StubArgs -contains '--version') { Write-Output '2026.08.20'; return }
-    if ($StubArgs -contains '-U')        { Write-Output 'yt-dlp is up to date'; return }
-
-    # Channel Info refresh
-    if ($StubArgs -contains '--write-all-thumbnails') {
-        $oi = [Array]::IndexOf($StubArgs, '-o')
-        $dir = Split-Path $StubArgs[$oi + 1] -Parent
-        New-Item -ItemType Directory -Path $dir -Force | Out-Null
-        Set-Content -LiteralPath (Join-Path $dir 'channel.info.json') -Value '{"channel":"Test Channel"}' -Encoding utf8
-        Set-Content -LiteralPath (Join-Path $dir 'channel.description') -Value 'Channel description.' -Encoding utf8
-        Write-Output '[youtube:tab] Extracting channel metadata'
-        return
-    }
-
-    # Comments pass
-    if ($StubArgs -contains '--write-comments') {
-        $oi = [Array]::IndexOf($StubArgs, '-o')
-        $dir = Split-Path $StubArgs[$oi + 1] -Parent
-        New-Item -ItemType Directory -Path $dir -Force | Out-Null
-
-        $requests = 5
-        if ($env:YTDLP_TEST_COMMENT_REQUESTS) { $requests = [int]$env:YTDLP_TEST_COMMENT_REQUESTS }
-        for ($i = 1; $i -le $requests; $i++) {
-            Write-Output "[youtube] testVideo01: Downloading comment API JSON (page $i)"
-        }
-        if ($env:YTDLP_TEST_COMMENT_THROTTLE -eq '1') {
-            Write-Output 'WARNING: [youtube] Incomplete data received, retrying (1/3)'
-        }
-        if ($env:YTDLP_TEST_COMMENT_EMPTY -eq '1') {
-            Set-Content -LiteralPath (Join-Path $dir 'comments.info.json') -Value '{"id":"testVideo01"}' -Encoding utf8
-            return
-        }
-        $payload = [ordered]@{
-            id            = 'testVideo01'
-            comment_count = 3
-            comments      = @(
-                [ordered]@{ id = 'c1';    text = 'top level one'; parent = 'root'; is_pinned = $true;  author_is_uploader = $false }
-                [ordered]@{ id = 'c2';    text = 'top level two'; parent = 'root'; is_pinned = $false; author_is_uploader = $false }
-                [ordered]@{ id = 'c2.r1'; text = 'a reply';       parent = 'c2';   is_pinned = $false; author_is_uploader = $true  }
-            )
-        }
-        $payload | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $dir 'comments.info.json') -Encoding utf8
-        return
-    }
-
-    Write-Output "[stub] unhandled yt-dlp invocation: $($StubArgs -join ' ')"
-}
-
 function New-PostprocessRoot {
     <# An install root, a stubbed yt-dlp, and a session log ready to slice. #>
     param([string]$Label, [hashtable]$VideoArgs = @{})
     $r = New-TestRoot -Label $Label
     Install-PipelineInto -TestRoot $r -RepoRoot $script:RepoRoot
     Enable-Stubs -TestRoot $r
-    New-StubBinary -TestRoot $r -Name 'yt-dlp' -Behavior $script:PostprocessStub | Out-Null
+    # The canonical three-call stub lives in lib/Fixtures.ps1 so every suite
+    # that runs postprocess.ps1 gets the same one -- see New-YtDlpStub for
+    # why stubbing only the call a test cares about is not safe.
+    New-YtDlpStub -TestRoot $r | Out-Null
     $video = New-VideoFolder -TestRoot $r @VideoArgs
     New-SessionLog -TestRoot $r | Out-Null
     $r | Add-Member -NotePropertyName Video -NotePropertyValue $video -Force

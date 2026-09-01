@@ -573,6 +573,152 @@ function New-SessionLog {
     return $path
 }
 
+function New-YtDlpStub {
+    <#
+        The standard yt-dlp stand-in for postprocess.ps1 tests.
+
+        Kept here rather than in one suite file because postprocess makes
+        THREE different yt-dlp calls -- the version query, the comments
+        pass, and the Channel Info refresh -- and a suite that stubbed only
+        the call it cared about would let the other two fall through to
+        whatever real yt-dlp is installed, which on your own machine is a
+        real one pointed at YouTube. Handling all three in one place keeps
+        that impossible, in every suite, without each one remembering to.
+
+        Behaviour is steered by environment variables, because the
+        scriptblock is serialised to a file and therefore cannot close over
+        anything:
+
+          YTDLP_TEST_COMMENT_REQUESTS  how many "Downloading comment API
+                                       JSON" lines to print (default 5)
+          YTDLP_TEST_COMMENT_THROTTLE  1 = also print a retry/incomplete-data line
+          YTDLP_TEST_COMMENT_EMPTY     1 = return an info.json with no comments at all
+          YTDLP_TEST_COMMENT_SET       clean (default) | dupes | orphans | twopinned
+    #>
+    param([Parameter(Mandatory = $true)]$TestRoot)
+    New-StubBinary -TestRoot $TestRoot -Name 'yt-dlp' -Behavior {
+        if ($StubArgs -contains '--version') { Write-Output '2026.08.20'; return }
+        if ($StubArgs -contains '-U')        { Write-Output 'yt-dlp is up to date'; return }
+
+        # Channel Info refresh
+        if ($StubArgs -contains '--write-all-thumbnails') {
+            $oi = [Array]::IndexOf($StubArgs, '-o')
+            $dir = Split-Path $StubArgs[$oi + 1] -Parent
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $dir 'channel.info.json') -Value '{"channel":"Test Channel"}' -Encoding utf8
+            Set-Content -LiteralPath (Join-Path $dir 'channel.description') -Value 'Channel description.' -Encoding utf8
+            Write-Output '[youtube:tab] Extracting channel metadata'
+            return
+        }
+
+        # Comments pass
+        if ($StubArgs -contains '--write-comments') {
+            $oi = [Array]::IndexOf($StubArgs, '-o')
+            $dir = Split-Path $StubArgs[$oi + 1] -Parent
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+
+            $requests = 5
+            if ($env:YTDLP_TEST_COMMENT_REQUESTS) { $requests = [int]$env:YTDLP_TEST_COMMENT_REQUESTS }
+            for ($i = 1; $i -le $requests; $i++) {
+                Write-Output "[youtube] testVideo01: Downloading comment API JSON (page $i)"
+            }
+            if ($env:YTDLP_TEST_COMMENT_THROTTLE -eq '1') {
+                Write-Output 'WARNING: [youtube] Incomplete data received, retrying (1/3)'
+            }
+            if ($env:YTDLP_TEST_COMMENT_EMPTY -eq '1') {
+                # No "comments" property AT ALL -- the shape a video with
+                # comments disabled produces, and the one that must give
+                # merged_count 0 rather than 1.
+                Set-Content -LiteralPath (Join-Path $dir 'comments.info.json') -Value '{"id":"testVideo01"}' -Encoding utf8
+                return
+            }
+
+            switch ($env:YTDLP_TEST_COMMENT_SET) {
+                'dupes' {
+                    $comments = @(
+                        [ordered]@{ id = 'c1'; text = 'top level one'; parent = 'root'; is_pinned = $true;  author_is_uploader = $false }
+                        [ordered]@{ id = 'c1'; text = 'the same id again'; parent = 'root'; is_pinned = $false; author_is_uploader = $false }
+                        [ordered]@{ id = 'c2'; text = 'top level two'; parent = 'root'; is_pinned = $false; author_is_uploader = $false }
+                    )
+                }
+                'orphans' {
+                    # A reply whose parent was never captured: proof of a
+                    # mid-traversal gap, and the sharpest local check there
+                    # is because it costs no external call at all.
+                    $comments = @(
+                        [ordered]@{ id = 'c1';        text = 'top level one'; parent = 'root';     is_pinned = $true;  author_is_uploader = $false }
+                        [ordered]@{ id = 'lost.r1';   text = 'reply to a comment that is not here'; parent = 'lostParent'; is_pinned = $false; author_is_uploader = $false }
+                        [ordered]@{ id = 'lost.r2';   text = 'another orphan';  parent = 'lostParent'; is_pinned = $false; author_is_uploader = $false }
+                    )
+                }
+                'twopinned' {
+                    # YouTube allows at most one pinned comment per video.
+                    $comments = @(
+                        [ordered]@{ id = 'c1'; text = 'pinned one'; parent = 'root'; is_pinned = $true; author_is_uploader = $false }
+                        [ordered]@{ id = 'c2'; text = 'pinned two'; parent = 'root'; is_pinned = $true; author_is_uploader = $false }
+                    )
+                }
+                default {
+                    $comments = @(
+                        [ordered]@{ id = 'c1';    text = 'top level one'; parent = 'root'; is_pinned = $true;  author_is_uploader = $false }
+                        [ordered]@{ id = 'c2';    text = 'top level two'; parent = 'root'; is_pinned = $false; author_is_uploader = $false }
+                        [ordered]@{ id = 'c2.r1'; text = 'a reply';       parent = 'c2';   is_pinned = $false; author_is_uploader = $true  }
+                    )
+                }
+            }
+
+            $payload = [ordered]@{
+                id            = 'testVideo01'
+                comment_count = $comments.Count
+                comments      = $comments
+            }
+            $payload | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $dir 'comments.info.json') -Encoding utf8
+            return
+        }
+
+        Write-Output "[stub] unhandled yt-dlp invocation: $($StubArgs -join ' ')"
+    }
+}
+
+function Get-ScriptRegion {
+    <#
+        Returns the source text of one region of a repo script, delimited by
+        two comment markers.
+
+        Used to run a single block of postprocess.ps1 -- currently the
+        comment-completeness audit -- in isolation, with a shadowing
+        Invoke-RestMethod, so the API branches can be exercised without a
+        key, without quota and without network. This is the technique the
+        audit was originally verified with, kept rather than reinvented.
+
+        Extracting the SHIPPED text matters. A re-typed copy of the block in
+        a test file drifts from the real one within a release or two, and
+        then the tests pass against code that is no longer running anywhere.
+
+        The trade is that this depends on two comment lines staying put, so
+        it fails loudly and specifically when they do not, rather than
+        silently testing an empty string.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$StartMarker,
+        [Parameter(Mandatory = $true)][string]$EndMarker
+    )
+    $lines = @(Get-Content -LiteralPath $Path)
+    $start = -1; $end = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($start -lt 0 -and $lines[$i] -match [regex]::Escape($StartMarker)) { $start = $i; continue }
+        if ($start -ge 0 -and $lines[$i] -match [regex]::Escape($EndMarker))   { $end = $i; break }
+    }
+    if ($start -lt 0) {
+        throw "Could not find the start marker '$StartMarker' in $Path. If that comment was reworded or the block moved, update the marker in the test that asked for it -- do not delete the test."
+    }
+    if ($end -lt 0) {
+        throw "Found '$StartMarker' in $Path but not the end marker '$EndMarker' after it. Update the markers in the test that asked for this region."
+    }
+    return (($lines[$start..($end - 1)]) -join "`n")
+}
+
 function Invoke-Postprocess {
     <#
         Runs the real postprocess.ps1 in a CHILD pwsh, the same way yt-dlp's
