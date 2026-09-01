@@ -485,6 +485,164 @@ try {
         Log "WARNING: Comments pass failed: $($_.Exception.Message)"
     }
 
+    # --- Comment completeness audit ---
+    # yt-dlp cannot tell you whether it got all the comments. It has no
+    # ground-truth count to check itself against, so a partial extraction
+    # looks exactly like a complete one: no error, no warning, just fewer
+    # comments in the file. That is not hypothetical -- yt-dlp/yt-dlp#15303
+    # was precisely this, where YouTube's A/B-tested threaded comments view
+    # caused silent extraction of 367 comments out of 684. Fixed upstream in
+    # #15419 (and the fix is in the version this pipeline pins), but the
+    # failure MODE is permanent: comment extraction is scraping, scraping
+    # breaks quietly when YouTube changes its response shape, and an archive
+    # that cannot detect the breakage inherits it forever.
+    #
+    # So: audit, do not re-fetch. This deliberately does NOT use the YouTube
+    # Data API to download comments -- that path would cost real quota and
+    # would lose is_pinned, is_favorited and author_is_verified, none of
+    # which the API exposes at all. yt-dlp remains the only fetcher. All
+    # this does is ask, for 1 quota unit, how many comments YouTube thinks
+    # exist, and compare.
+    #
+    # The local invariants below cost nothing and run unconditionally, even
+    # with no API key. The orphan-reply check is the sharpest of them: a
+    # reply whose parent was never captured is proof of a mid-traversal gap,
+    # detectable with no external call whatsoever.
+    $commentAudit = [ordered]@{
+        merged_count      = $null
+        yt_dlp_reported   = $null
+        api_comment_count = $null
+        api_status        = 'not_attempted'
+        shortfall_ratio   = $null
+        tolerance         = $null
+        duplicate_ids     = $null
+        orphan_replies    = $null
+        pinned_count      = $null
+        audited_at        = (Get-Date).ToString('o')
+    }
+    try {
+        # statistics.commentCount is an APPROXIMATION on YouTube's side -- it
+        # is cached, it drifts, and it is not guaranteed to equal parents plus
+        # replies exactly. Hence a percentage tolerance rather than an equality
+        # check. 5% is loose enough to absorb that drift and still catch the
+        # #15303-class failure by a wide margin (that one was 46% short). Both
+        # raw numbers are recorded in manifest.json on every run, so the real
+        # ratio can be calibrated from actual archive data instead of guessed.
+        $auditTolerance = 0.05
+        if ($env:YTDLP_COMMENT_AUDIT_TOLERANCE) {
+            $parsedTol = 0.0
+            if ([double]::TryParse($env:YTDLP_COMMENT_AUDIT_TOLERANCE, [ref]$parsedTol) -and $parsedTol -ge 0 -and $parsedTol -le 1) {
+                $auditTolerance = $parsedTol
+            } else {
+                Log "WARNING: comment audit -- YTDLP_COMMENT_AUDIT_TOLERANCE is not a number between 0 and 1; using the 0.05 default."
+            }
+        }
+        $commentAudit.tolerance = $auditTolerance
+
+        $auditComments = @()
+        if ($infoJsonFile -and (Test-Path $infoJsonFile.FullName)) {
+            $auditInfo = Get-Content $infoJsonFile.FullName -Raw | ConvertFrom-Json
+            # NOT @($auditInfo.comments) directly: if the property is absent
+            # that yields a one-element array containing $null, and the count
+            # comes out as 1 for a video with no comments at all.
+            if ($auditInfo.comments) { $auditComments = @($auditInfo.comments) }
+            $commentAudit.yt_dlp_reported = $auditInfo.comment_count
+        }
+        $commentAudit.merged_count = $auditComments.Count
+
+        # --- Local invariants: zero quota, no network, always run ---
+        if ($auditComments.Count -gt 0) {
+            $auditIds = New-Object 'System.Collections.Generic.HashSet[string]'
+            $auditDupes = 0
+            foreach ($c in $auditComments) {
+                if ($c.id -and -not $auditIds.Add([string]$c.id)) { $auditDupes++ }
+            }
+            $auditOrphans = 0
+            foreach ($c in $auditComments) {
+                $cParent = [string]$c.parent
+                if ($cParent -and $cParent -ne 'root' -and -not $auditIds.Contains($cParent)) { $auditOrphans++ }
+            }
+            $auditPinned = @($auditComments | Where-Object { $_.is_pinned }).Count
+
+            $commentAudit.duplicate_ids  = $auditDupes
+            $commentAudit.orphan_replies = $auditOrphans
+            $commentAudit.pinned_count   = $auditPinned
+
+            if ($auditDupes -gt 0) {
+                Log "WARNING: comment audit -- $auditDupes duplicate comment id(s) in the merged set."
+            }
+            if ($auditOrphans -gt 0) {
+                Log "WARNING: comment audit -- $auditOrphans repl(ies) whose parent comment was never captured. That is an extraction gap, not a display quirk."
+            }
+            if ($auditPinned -gt 1) {
+                Log "WARNING: comment audit -- $auditPinned comments flagged is_pinned, but YouTube allows at most one per video."
+            }
+        }
+
+        # --- API cross-check: exactly 1 quota unit per video ---
+        $apiKey = $env:YTDLP_YOUTUBE_API_KEY
+        if ([string]::IsNullOrWhiteSpace($apiKey)) {
+            $commentAudit.api_status = 'no_key'
+            Log "Comment audit: local checks only (set YTDLP_YOUTUBE_API_KEY to enable the API cross-check)."
+        } elseif (-not $videoId) {
+            $commentAudit.api_status = 'no_video_id'
+            Log "WARNING: comment audit -- no video id resolved; API cross-check skipped."
+        } else {
+            try {
+                # The key travels in the query string, which is the form the
+                # Data API documents. That means it can appear inside whatever
+                # exception message PowerShell builds from the request URI, so
+                # every message logged from the catch below is passed through
+                # an explicit redaction first. Never log $auditUri itself.
+                $auditUri = "https://www.googleapis.com/youtube/v3/videos?part=statistics&id=$videoId&key=$apiKey"
+                $auditResp = Invoke-RestMethod -Uri $auditUri -Method Get -TimeoutSec 30 -ErrorAction Stop
+                $auditItem = @($auditResp.items) | Select-Object -First 1
+                if (-not $auditItem) {
+                    $commentAudit.api_status = 'video_not_found'
+                    Log "WARNING: comment audit -- the API returned no such video (deleted, private, or region-blocked). Cross-check skipped."
+                } elseif ($null -eq $auditItem.statistics.commentCount) {
+                    $commentAudit.api_status = 'comment_count_unavailable'
+                    Log "Comment audit: the API reports no comment count for this video (comments disabled or hidden)."
+                } else {
+                    $apiCount = [long]$auditItem.statistics.commentCount
+                    $commentAudit.api_comment_count = $apiCount
+                    $commentAudit.api_status = 'ok'
+                    if ($apiCount -gt 0) {
+                        $auditRatio = [math]::Round(1 - ($commentAudit.merged_count / $apiCount), 4)
+                        # Clamp: archiving MORE than the reported count is normal
+                        # (the statistic lags, and yt-dlp sees replies the count
+                        # may not include). A negative shortfall is not a finding.
+                        if ($auditRatio -lt 0) { $auditRatio = 0 }
+                        $commentAudit.shortfall_ratio = $auditRatio
+                        if ($auditRatio -gt $auditTolerance) {
+                            Log ("WARNING: comment audit -- archived {0} of ~{1} comments the API reports ({2}% short, tolerance {3}%). Worth re-running the comments pass for this video." -f $commentAudit.merged_count, $apiCount, [math]::Round($auditRatio * 100, 1), [math]::Round($auditTolerance * 100, 1))
+                        } else {
+                            Log ("Comment audit: archived {0} vs ~{1} reported by the API -- within tolerance." -f $commentAudit.merged_count, $apiCount)
+                        }
+                    }
+                }
+            } catch {
+                $auditMsg = $_.Exception.Message
+                if ($apiKey) { $auditMsg = $auditMsg -replace [regex]::Escape($apiKey), '<redacted>' }
+                $auditCode = $null
+                try { $auditCode = [int]$_.Exception.Response.StatusCode } catch { }
+                if ($auditCode -eq 403) {
+                    $commentAudit.api_status = 'forbidden_or_quota'
+                    Log "WARNING: comment audit -- API returned 403: daily quota exhausted, key restricted, or YouTube Data API v3 not enabled on the project. Audit skipped; the download itself is unaffected."
+                } elseif ($auditCode -eq 400) {
+                    $commentAudit.api_status = 'bad_request'
+                    Log "WARNING: comment audit -- API returned 400, which almost always means YTDLP_YOUTUBE_API_KEY is malformed. Audit skipped; the download itself is unaffected."
+                } else {
+                    $commentAudit.api_status = 'error'
+                    Log "WARNING: comment audit -- API call failed: $auditMsg"
+                }
+            }
+        }
+    } catch {
+        $commentAudit.api_status = 'audit_failed'
+        Log "WARNING: comment audit failed entirely: $($_.Exception.Message)"
+    }
+
     # --- Re-embed the (now comment-complete) info.json into the .mkv ---
     # This is what --embed-info-json would normally do, done manually and
     # deferred until after the comments merge above. ffmpeg attaches the
@@ -626,6 +784,7 @@ try {
         subtitle_languages      = $subLangs
         every_filename          = $fileList
         file_hashes             = $fileHashes
+        comment_audit           = $commentAudit
     }
     $manifest | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $videoMetaDir "manifest.json")
     Log "Wrote manifest.json."
