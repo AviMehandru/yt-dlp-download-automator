@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# POSIX shim for the test suite (Linux and macOS).
+#
+# Deliberately contains no logic, for the same reason scripts/ytdl does not:
+# all of it lives once, in run-tests.ps1, so a command that works on one
+# platform works verbatim on all three because there is one runner, not
+# three kept in agreement by hand. The cmd.exe counterpart is run-tests.cmd.
+#
+# "$@" (quoted) is what keeps -Filter '*a b*' one argument.
+set -u
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+if ! command -v pwsh >/dev/null 2>&1; then
+    echo "Error: pwsh (PowerShell 7) is not on PATH." >&2
+    echo "The pipeline itself cannot run without it either -- re-run setup.sh." >&2
+    exit 2
+fi
+
+exec pwsh -NoProfile -File "${HERE}/run-tests.ps1" "$@"
