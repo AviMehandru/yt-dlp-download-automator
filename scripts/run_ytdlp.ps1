@@ -727,4 +727,47 @@ if ($Workers -le 1) {
     }
 }
 
+# --- Retire the staging folder itself if the session left it empty (#5) ---
+# postprocess.ps1 already sweeps the empty per-video subfolders yt-dlp
+# leaves behind INSIDE _incomplete after each video (yt-dlp/yt-dlp#11674),
+# but it deliberately stops short of _incomplete itself: it runs per video,
+# from --exec after_move, while later videos in the same session -- and, in
+# parallel mode, other workers at that very moment -- are still staging
+# files through that exact folder. Removing it from there would be pulling
+# the floor out from under an in-flight download.
+#
+# Here is the one point in the pipeline where it is safe: every yt-dlp
+# invocation this session made (the single stream, or all N workers, which
+# ForEach-Object -Parallel has already joined by now) has returned, so
+# nothing is writing under _incomplete any more. Nothing is lost by
+# removing it: the self-heal block at the top of this script recreates it
+# on the next invocation, and yt-dlp's --paths temp: would create it on
+# demand regardless.
+#
+# The check is strict on purpose -- ANY entry, including hidden ones, and
+# the folder is left completely alone. A non-empty _incomplete is not
+# clutter; it is the .part/.ytdl fragments of a download that failed or was
+# interrupted, and those files are exactly what yt-dlp needs to resume
+# rather than restart it. -Force is what makes that true: without it
+# Get-ChildItem skips hidden entries, and the folder would look empty while
+# still holding resumable state (the same hidden-file trap the dependency
+# throttle marker hit once already, higher up in this script).
+try {
+    if (Test-Path $incompleteDir) {
+        $stagedLeftovers = @(Get-ChildItem -Path $incompleteDir -Force -ErrorAction Stop)
+        if ($stagedLeftovers.Count -eq 0) {
+            Remove-Item -Path $incompleteDir -Force -ErrorAction Stop
+            "-- Removed the empty _incomplete staging folder. --" | Tee-Object -FilePath $logFile -Append
+        } else {
+            "-- Kept _incomplete: $($stagedLeftovers.Count) item(s) still staged there (resumable partial download). --" | Tee-Object -FilePath $logFile -Append
+        }
+    }
+} catch {
+    # Non-fatal by design: a leftover staging folder costs nothing, and a
+    # session that downloaded everything correctly should not report failure
+    # because a housekeeping delete lost a race with an antivirus scanner or
+    # an open Explorer window.
+    "-- WARNING: Could not remove _incomplete: $($_.Exception.Message) --" | Tee-Object -FilePath $logFile -Append
+}
+
 "==== Download session finished $(Get-Date -Format o) ====" | Tee-Object -FilePath $logFile -Append

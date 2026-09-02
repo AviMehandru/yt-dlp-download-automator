@@ -64,15 +64,57 @@ Describe 'run_ytdlp.ps1 session orchestration' {
     It 'recreates every structural folder in an empty data root' {
         $r = New-OrchestratorRoot -Label 'selfheal' -Behavior $downloadBehavior
         try {
-            $null = Invoke-RunYtdlp -TestRoot $r -Url 'https://youtu.be/testVideo01'
+            $run = Invoke-RunYtdlp -TestRoot $r -Url 'https://youtu.be/testVideo01'
             foreach ($rel in @(
                 'Archive Logs/Logs', 'Archive Logs/Archive History',
-                'Youtube Videos/Complete Archive', 'Youtube Videos/_incomplete',
+                'Youtube Videos/Complete Archive',
                 'Youtube Videos/Final Video'
             )) {
                 Assert-PathExists (Join-Path $r.DataRoot $rel) `
                     "the self-heal step must recreate $rel on every invocation"
             }
+            # _incomplete is the one structural folder NOT asserted above:
+            # self-heal creates it, and the end-of-session cleanup removes it
+            # again because this run left it empty. Its recreation is
+            # asserted through the log line instead, so this test still fails
+            # if self-heal ever stops creating it.
+            Assert-Match ([regex]::Escape("Recreated missing folder: $(Join-Path $r.DataRoot 'Youtube Videos/_incomplete')")) `
+                ($run.Output -join "`n") 'self-heal must still create _incomplete before the download'
+        } finally { Remove-TestRoot $r }
+    }
+
+    # The two tests below are the whole contract of the end-of-session
+    # _incomplete cleanup: empty means disposable, anything at all inside
+    # means a partial download that yt-dlp can still resume, and resuming
+    # needs those exact fragments. Getting the second case wrong turns a
+    # housekeeping convenience into silent data loss, which is why the
+    # not-empty case is tested with a HIDDEN file specifically -- the
+    # emptiness check reads as correct either way, and only -Force on
+    # Get-ChildItem makes it actually correct.
+    It 'removes the _incomplete staging folder when the session leaves it empty' {
+        $r = New-OrchestratorRoot -Label 'sweepempty' -Behavior $downloadBehavior
+        try {
+            $run = Invoke-RunYtdlp -TestRoot $r -Url 'https://youtu.be/testVideo01'
+            Assert-PathMissing (Join-Path $r.DataRoot 'Youtube Videos/_incomplete') `
+                'an empty _incomplete must not survive the end of a session'
+            Assert-Match 'Removed the empty _incomplete staging folder' ($run.Output -join "`n")
+        } finally { Remove-TestRoot $r }
+    }
+
+    It 'keeps _incomplete when a partial download is still staged in it' {
+        $r = New-OrchestratorRoot -Label 'sweepkeep' -Behavior $downloadBehavior
+        try {
+            $incomplete = Join-Path $r.DataRoot 'Youtube Videos/_incomplete'
+            New-Item -ItemType Directory -Path $incomplete -Force | Out-Null
+            # Dot-prefixed, so PowerShell treats it as hidden on Unix and
+            # Get-ChildItem WITHOUT -Force would not see it at all.
+            $partial = Join-Path $incomplete '.testVideo02.f248.mp4.part'
+            Set-Content -LiteralPath $partial -Value 'partial fragment' -Encoding utf8
+
+            $run = Invoke-RunYtdlp -TestRoot $r -Url 'https://youtu.be/testVideo01'
+            Assert-PathExists $incomplete 'a non-empty _incomplete must be left alone'
+            Assert-PathExists $partial 'resumable fragments must survive the cleanup untouched'
+            Assert-Match 'Kept _incomplete' ($run.Output -join "`n")
         } finally { Remove-TestRoot $r }
     }
 

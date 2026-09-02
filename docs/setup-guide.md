@@ -1139,7 +1139,9 @@ natively.
       Video metadata/     Info.info.json, Description.*, manifest.json, checksums.sha256
     Complete Archive/<Uploader>/Channel Info/    avatar, banner, description
     Final Video/<Uploader>/   flat "point a player here" copies
-    _incomplete/         yt-dlp temp path; empty dirs swept after each video
+    _incomplete/         yt-dlp temp path; empty dirs swept after each video,
+                         and the folder itself removed at the end of a session
+                         if nothing is left staged in it (recreated next run)
     global_manifest.json
 ```
 
