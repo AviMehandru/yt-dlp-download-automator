@@ -311,16 +311,46 @@ function New-TinyMkv {
         zero-byte "video" fails, and the whole point of that test is to
         prove the swap-on-success guard works on a file that genuinely
         remuxes.
+
+        SEVERAL CODEC COMBINATIONS ARE TRIED, in descending order of
+        realism. h264 + aac is what a real archive mostly holds, so it goes
+        first -- but it needs libx264, which is an EXTERNAL library that
+        distributions with patent concerns leave out. Fedora's stock
+        `ffmpeg-free` is exactly that build, so on Fedora the single-codec
+        version of this function produced nothing and every test that needs
+        a genuinely remuxable file skipped, including the info.json
+        re-embed. That skip was a property of the test fixture, not of the
+        pipeline: nothing in postprocess.ps1 ever ENCODES video (the
+        re-embed is `-map 0 -c copy`, and yt-dlp's own merge is a stream
+        copy too), so ffmpeg-free runs the real pipeline perfectly well.
+
+        The later candidates are all encoders built into ffmpeg itself with
+        no external dependency, so at least one of them exists in any build
+        worth calling ffmpeg.
     #>
     param([Parameter(Mandatory = $true)][string]$Path)
     if (-not (Test-HasCommand 'ffmpeg')) { return $false }
     New-Item -ItemType Directory -Path (Split-Path $Path -Parent) -Force | Out-Null
-    $null = & ffmpeg -y -loglevel error `
-        -f lavfi -i "testsrc=size=32x32:rate=5:duration=1" `
-        -f lavfi -i "anullsrc=r=8000:cl=mono" `
-        -shortest -t 1 -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac `
-        $Path 2>&1
-    return ((Test-Path -LiteralPath $Path) -and ((Get-Item -LiteralPath $Path).Length -gt 0))
+
+    $attempts = @(
+        @{ V = @('-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p'); A = @('-c:a', 'aac') }
+        @{ V = @('-c:v', 'mpeg4');                                                  A = @('-c:a', 'aac') }
+        @{ V = @('-c:v', 'mpeg4');                                                  A = @('-c:a', 'pcm_s16le') }
+        @{ V = @('-c:v', 'ffv1');                                                   A = @('-c:a', 'pcm_s16le') }
+    )
+
+    foreach ($attempt in $attempts) {
+        Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+        $null = & ffmpeg -y -loglevel error `
+            -f lavfi -i "testsrc=size=32x32:rate=5:duration=1" `
+            -f lavfi -i "anullsrc=r=8000:cl=mono" `
+            -shortest -t 1 @($attempt.V) @($attempt.A) `
+            $Path 2>&1
+        if ((Test-Path -LiteralPath $Path) -and ((Get-Item -LiteralPath $Path).Length -gt 0)) {
+            return $true
+        }
+    }
+    return $false
 }
 
 function New-InfoJson {

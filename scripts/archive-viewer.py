@@ -627,6 +627,56 @@ class Index(object):
 # a WebM content type -- no ffmpeg, no copy, no disk cost.
 WEBM_VIDEO = {"vp8", "vp9", "av01", "av1"}
 WEBM_AUDIO = {"opus", "vorbis"}
+# Encoder profiles for the ONE path that actually re-encodes, in descending
+# order of preference. The first whose video AND audio encoders both exist in
+# this ffmpeg build is the one used.
+#
+# libx264 is not universally available, and that is not an exotic edge case:
+# it is an EXTERNAL library that distributions with patent concerns leave
+# out, so Fedora's stock ffmpeg-free -- what `dnf install ffmpeg` gives you
+# without RPM Fusion -- has no libx264 at all. A hardcoded libx264 meant the
+# transcode button failed there with "Unknown encoder 'libx264'", which is
+# opaque unless you already know why.
+#
+# The rest of this program is unaffected by any of that, because nothing else
+# here encodes anything: WebM-compatible Matroska is served straight from the
+# archive, and everything MP4-copyable is `-c copy`. Only this list needed to
+# learn that ffmpeg builds differ.
+#
+# openh264 comes second because it keeps the output in MP4/h264 -- same
+# container, same compatibility, just Cisco's encoder instead of x264 -- and
+# Fedora enables it by default. VP9 and VP8 in WebM are the last resorts:
+# royalty-free, so present in essentially every build, and playable in every
+# modern browser, at the cost of a slower encode.
+TRANSCODE_PROFILES = [
+    {"name": "h264 (libx264) in MP4",
+     "video": ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"],
+     "audio": ["-c:a", "aac", "-b:a", "192k"],
+     "vencoder": "libx264", "aencoder": "aac",
+     "mux": ["-movflags", "+faststart", "-f", "mp4"], "ext": "mp4", "mime": "video/mp4"},
+    {"name": "h264 (libopenh264) in MP4",
+     "video": ["-c:v", "libopenh264", "-pix_fmt", "yuv420p"],
+     "audio": ["-c:a", "aac", "-b:a", "192k"],
+     "vencoder": "libopenh264", "aencoder": "aac",
+     "mux": ["-movflags", "+faststart", "-f", "mp4"], "ext": "mp4", "mime": "video/mp4"},
+    {"name": "VP9 + Opus in WebM",
+     # -b:v 0 is what makes -crf constant-quality rather than a ceiling on a
+     # bitrate that was never set; -row-mt and -cpu-used keep libvpx-vp9 from
+     # being unusably slow at default settings.
+     "video": ["-c:v", "libvpx-vp9", "-crf", "32", "-b:v", "0",
+               "-row-mt", "1", "-deadline", "good", "-cpu-used", "4",
+               "-pix_fmt", "yuv420p"],
+     "audio": ["-c:a", "libopus", "-b:a", "128k"],
+     "vencoder": "libvpx-vp9", "aencoder": "libopus",
+     "mux": ["-f", "webm"], "ext": "webm", "mime": "video/webm"},
+    {"name": "VP8 + Opus in WebM",
+     "video": ["-c:v", "libvpx", "-crf", "10", "-b:v", "1M", "-pix_fmt", "yuv420p"],
+     "audio": ["-c:a", "libopus", "-b:a", "128k"],
+     "vencoder": "libvpx", "aencoder": "libopus",
+     "mux": ["-f", "webm"], "ext": "webm", "mime": "video/webm"},
+]
+
+
 # What an MP4 can legally carry AND a browser will decode, so `-c copy` works.
 MP4_VIDEO = {"h264", "avc1", "hevc", "h265", "av01", "av1", "vp9"}
 MP4_AUDIO = {"aac", "mp3", "opus", "flac", "alac", "mp4a"}
@@ -648,7 +698,48 @@ class MediaManager(object):
         self.jobs = {}
         self.probes = {}
         self.lock = threading.Lock()
+        self._encoders = None
+        self._profile = False   # False = not yet resolved; None = none usable
         (self.cache_dir / "media").mkdir(parents=True, exist_ok=True)
+
+    # -- what this ffmpeg can actually encode ------------------------------
+    def encoders(self):
+        """Encoder names this ffmpeg build has, read once and cached."""
+        if self._encoders is not None:
+            return self._encoders
+        names = set()
+        if self.ffmpeg:
+            try:
+                out = subprocess.run([self.ffmpeg, "-hide_banner", "-encoders"],
+                                     stdout=subprocess.PIPE,
+                                     stderr=subprocess.DEVNULL, timeout=30)
+                for line in out.stdout.decode("utf-8", "replace").splitlines():
+                    # Rows look like " V....D libx264   libx264 H.264 ..."
+                    parts = line.split()
+                    if len(parts) >= 2 and len(parts[0]) == 6 and parts[0][0] in "VAS":
+                        names.add(parts[1])
+            except Exception as exc:
+                log("could not list ffmpeg encoders (%s)" % exc)
+        self._encoders = names
+        return names
+
+    def transcode_profile(self):
+        """The first profile this ffmpeg can actually run, or None."""
+        if self._profile is not False:
+            return self._profile
+        available = self.encoders()
+        chosen = None
+        for prof in TRANSCODE_PROFILES:
+            if prof["vencoder"] in available and prof["aencoder"] in available:
+                chosen = prof
+                break
+        if chosen:
+            log("transcode profile: %s" % chosen["name"])
+        elif self.ffmpeg:
+            log("no usable transcode profile -- this ffmpeg has none of: %s"
+                % ", ".join(p["vencoder"] for p in TRANSCODE_PROFILES))
+        self._profile = chosen
+        return chosen
 
     # -- probing ----------------------------------------------------------
     def probe(self, path):
@@ -737,15 +828,34 @@ class MediaManager(object):
             return {"mode": "remux", "mime": "video/mp4",
                     "reason": "%s + %s can be copied into MP4 without "
                               "re-encoding." % (v or "?", a or "?")}
-        return {"mode": "transcode" if self.allow_transcode else "unsupported",
-                "mime": "video/mp4",
-                "reason": "%s + %s cannot be copied into a browser-playable "
-                          "container; playing it here needs a real re-encode."
-                          % (v or "?", a or "?")}
+        why = ("%s + %s cannot be copied into a browser-playable container; "
+               "playing it here needs a real re-encode." % (v or "?", a or "?"))
+        if not self.allow_transcode:
+            return {"mode": "unsupported", "mime": "video/mp4", "reason": why}
+        prof = self.transcode_profile()
+        if not prof:
+            # Better to say this than to offer a button that fails on click.
+            return {"mode": "unsupported", "mime": "video/mp4",
+                    "reason": why + " This ffmpeg build has no encoder this "
+                                    "viewer can use -- on Fedora and similar, "
+                                    "install the full ffmpeg (RPM Fusion) or a "
+                                    "build with libx264, libopenh264 or libvpx."}
+        return {"mode": "transcode", "mime": prof["mime"],
+                "profile": prof["name"],
+                "reason": why + " Re-encoding as %s." % prof["name"]}
 
     # -- remux / transcode -------------------------------------------------
     def output_path(self, key, mode):
-        return self.cache_dir / "media" / ("%s.%s.mp4" % (key, mode))
+        # Remux is only ever chosen for MP4-copyable streams, so it is always
+        # .mp4. Transcode follows whichever profile this build resolved to,
+        # which may be WebM -- the extension has to match or the file is
+        # served with the wrong type.
+        ext = "mp4"
+        if mode == "transcode":
+            prof = self.transcode_profile()
+            if prof:
+                ext = prof["ext"]
+        return self.cache_dir / "media" / ("%s.%s.%s" % (key, mode, ext))
 
     def status(self, key, src, mode):
         out = self.output_path(key, mode)
@@ -790,13 +900,20 @@ class MediaManager(object):
         if has_audio:
             cmd += ["-map", "0:a:%d" % aidx]
         if mode == "remux":
-            cmd += ["-c", "copy"]
+            # +faststart moves the moov atom to the front so the browser can
+            # seek immediately instead of waiting for the whole file.
+            cmd += ["-c", "copy", "-movflags", "+faststart", "-f", "mp4", str(part)]
         else:
-            cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k"]
-        # +faststart moves the moov atom to the front so the browser can seek
-        # immediately instead of waiting for the whole file.
-        cmd += ["-movflags", "+faststart", "-f", "mp4", str(part)]
+            prof = self.transcode_profile()
+            if not prof:
+                with self.lock:
+                    self.jobs[(key, mode)] = {
+                        "state": "error", "progress": 0.0,
+                        "error": "This ffmpeg build has no encoder this viewer "
+                                 "can use (looked for %s)."
+                                 % ", ".join(p["vencoder"] for p in TRANSCODE_PROFILES)}
+                return
+            cmd += prof["video"] + prof["audio"] + prof["mux"] + [str(part)]
         log("%s -> %s" % (mode, out.name))
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
@@ -990,6 +1107,11 @@ def make_handler(app):
                     "progress": idx.scan_progress,
                     "ffmpeg": bool(app.media.ffmpeg),
                     "ffprobe": bool(app.media.ffprobe),
+                    # Which encoder a re-encode would actually use here.
+                    # Surfaced because it varies by ffmpeg BUILD, not just by
+                    # whether ffmpeg exists -- null means this build has none
+                    # of the encoders this viewer knows how to drive.
+                    "transcode_profile": (app.media.transcode_profile() or {}).get("name"),
                     "can_open_local": app.allow_open_local and self.is_local(),
                     "version": VIEWER_VERSION,
                     "last_scan": idx.last_scan,
@@ -1226,7 +1348,10 @@ def make_handler(app):
                 if mode in ("remux", "transcode"):
                     out = app.media.output_path(entry.key, mode)
                     if out.exists():
-                        return send_file_range(self, out, "video/mp4")
+                        # Derived from the actual file, not assumed: a
+                        # transcode may have landed as WebM.
+                        mime = mimetypes.guess_type(out.name)[0] or "video/mp4"
+                        return send_file_range(self, out, mime)
                     return self._err(409, "Playback copy is not ready yet.")
                 plan = app.media.plan(src)
                 return send_file_range(self, src, plan.get("mime") or "video/webm")

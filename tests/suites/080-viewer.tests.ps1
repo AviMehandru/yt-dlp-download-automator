@@ -366,6 +366,62 @@ learn to ignore.
         } finally { Stop-Viewer $v; Remove-TestRoot $r }
     }
 
+    It 'picks a transcode encoder this ffmpeg build actually has' {
+        # libx264 is an EXTERNAL library, not part of ffmpeg itself, and
+        # distributions with patent concerns leave it out -- Fedora's stock
+        # ffmpeg-free is exactly that build. A hardcoded encoder meant the
+        # transcode button failed there with "Unknown encoder 'libx264'".
+        # The viewer now reads `ffmpeg -encoders` and picks the first profile
+        # it can actually run, so this asserts the choice is real ON THIS
+        # MACHINE rather than assuming any particular build.
+        if (-not (Test-HasCommand 'ffmpeg')) { Skip-Test 'ffmpeg is not on PATH.' }
+        $r = New-ViewerRoot -Label 'viewer-encoder'
+        $v = $null
+        try {
+            $v = Start-Viewer -TestRoot $r
+            $status = Wait-ForScan -Viewer $v -Expected 2
+            Assert-True ($null -ne $status.transcode_profile) `
+                'ffmpeg is installed, so some transcode profile should have resolved'
+
+            # The profile names carry their encoder in brackets; whichever was
+            # chosen must appear in this build's encoder list.
+            $encoders = (& ffmpeg -hide_banner -encoders 2>&1) -join "`n"
+            $encoder = [regex]::Match("$($status.transcode_profile)", '\(([^)]+)\)').Groups[1].Value
+            if (-not $encoder) {
+                # A WebM profile names its codecs rather than a library.
+                $encoder = if ("$($status.transcode_profile)" -match 'VP9') { 'libvpx-vp9' } else { 'libvpx' }
+            }
+            Assert-Match ([regex]::Escape($encoder)) $encoders @"
+The viewer chose the transcode profile '$($status.transcode_profile)', but
+'$encoder' is not in this ffmpeg build's encoder list. A re-encode would fail
+with "Unknown encoder". The profile list in archive-viewer.py must only ever
+resolve to something `ffmpeg -encoders` reports.
+"@
+        } finally { Stop-Viewer $v; Remove-TestRoot $r }
+    }
+
+    It 'reports no profile, rather than a broken one, when nothing can encode' {
+        # The Fedora case taken to its limit: an ffmpeg that can encode
+        # nothing this viewer knows how to drive. It must say so up front so
+        # the UI can decline, instead of offering a button that fails on
+        # click.
+        $r = New-ViewerRoot -Label 'viewer-noencoder'
+        $v = $null
+        try {
+            # A stand-in ffmpeg whose -encoders listing is empty.
+            $fake = Join-Path $r.Root 'ffmpeg-no-encoders'
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText($fake, "#!/bin/sh`nexit 0`n", $utf8NoBom)
+            if ($IsWindows) { Skip-Test 'Needs a POSIX shell for the stand-in ffmpeg.' }
+            & chmod +x $fake
+
+            $v = Start-Viewer -TestRoot $r -ExtraArgs @('--ffmpeg', $fake)
+            $status = Wait-ForScan -Viewer $v -Expected 2
+            Assert-True ($null -eq $status.transcode_profile) `
+                'an ffmpeg that lists no encoders must resolve to no profile at all'
+        } finally { Stop-Viewer $v; Remove-TestRoot $r }
+    }
+
     It 'never offers a re-encode when started with --no-transcode' {
         $r = New-ViewerRoot -Label 'viewer-notranscode'
         $v = $null
