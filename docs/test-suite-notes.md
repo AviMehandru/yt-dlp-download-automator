@@ -5,7 +5,10 @@ Supersedes the commit 1 notes; the differences are listed under
 "What changed in this commit" at the end.*
 
 `tests/` in the repo. One command, all three platforms, 118 tests, about two
-and a half minutes, no network and no YouTube.
+and a half minutes. Nothing reaches YouTube and nothing touches your archive.
+(Not strictly offline: one test runs the real dependency check once, which on
+Linux makes a single HTTPS request to github.com and queries the local package
+manager. Both degrade to a logged warning with no network.)
 
 ```bash
 ./tests/run-tests            # Linux, macOS
@@ -13,7 +16,7 @@ tests\run-tests.cmd          # Windows
 ./tests/run-tests -Live      # plus one real download
 ```
 
-Full usage lives in `tests/README.md`. This document is the *why*.
+Full usage lives in `docs/test-suite-usage.md`. This document is the *why*.
 
 ## Shape
 

@@ -1,4 +1,4 @@
-# tests/
+# The test suite
 
 The automated test suite for the yt-dlp archival pipeline. One command, all
 platforms, no dependencies to install first.
@@ -8,8 +8,8 @@ platforms, no dependencies to install first.
 tests\run-tests.cmd          # Windows
 ```
 
-118 tests, about two and a half minutes, no network and no YouTube. It writes a
-pass/fail summary to the console and a self-contained HTML report to
+118 tests, about two and a half minutes. Nothing reaches YouTube and nothing
+touches your archive. It writes a pass/fail summary to the console and a self-contained HTML report to
 `tests/results/results.html`, and exits non-zero if anything failed.
 
 ## What it is
@@ -90,6 +90,185 @@ deliberately does not exercise at full scale.
 The live run leaves its archive in the temp directory rather than deleting
 it, and prints the path. It is the most useful thing to look at when
 something about that run was surprising.
+
+## How to actually use it
+
+### It tests the repo, not the install
+
+This is the part that changes how you work. `run-tests.ps1` resolves the repo
+root from its own location and every suite copies the pipeline out of
+`scripts/` and `config/` into a throwaway install root. So you edit
+`scripts/postprocess.ps1` **in your clone** and run the suite — no `cp` into
+`~/yt-dlp/scripts/`, no re-running `setup.sh`, no touching your real archive.
+The edit-then-reinstall loop is only needed when you want to use the change
+for a real download.
+
+```bash
+cd ~/Documents/repos/yt-dlp-download-automator
+$EDITOR scripts/postprocess.ps1
+./tests/run-tests -Suite '05*'          # seconds, against the file you just saved
+```
+
+### The inner loop: run only what you touched
+
+`-Suite` takes a wildcard against the suite FILE name, and the others are
+never loaded at all. Measured on a Linux VM:
+
+| Suite | Run it after touching | Tests | Time |
+|---|---|---|---|
+| `-Suite '010*'` | anything at all — it just parses every file | 15 | 8s |
+| `-Suite '020*'` | `scripts/ytdl*` | 16 | 12s |
+| `-Suite '030*'` | `config/yt-dlp.conf` | 7 | <1s |
+| `-Suite '040*'` | `scripts/run_ytdlp.ps1` | 12 | 26s |
+| `-Suite '05*'`  | `scripts/postprocess.ps1` (050 + 055) | 44 | 89s |
+| `-Suite '055*'` | just the comment audit | 23 | 37s |
+| `-Suite '060*'` | the locking in `postprocess.ps1` | 5 | 22s |
+| `-Suite '070*'` | `setup.sh`, `setup.ps1`, `setup-common.ps1` | 9 | 4s |
+| `-Suite '080*'` | `scripts/archive-viewer.py` | 9 | 9s |
+
+A full run is about two and a half minutes. `-NoReport` skips the HTML if you only want the
+console.
+
+Run the whole thing before you commit; run one suite while you are still
+editing. `-Filter` narrows further, matching `"<suite name> <test name>"`:
+
+```bash
+./tests/run-tests -Filter '*counts each comment*'
+./tests/run-tests -Filter '*sync*'
+```
+
+### Reading a failure
+
+The console gives you the assertion, what was expected and what was found:
+
+```
+  [FAIL] queues nothing when --sync finds the newest video already archived
+         Assert-Equal failed
+           expected: [0]
+           actual:   [2]
+         --sync queued videos when the newest one was already archived.
+         $videoIds[0..($cutIndex - 1)] with $cutIndex = 0 evaluates 0..-1 ...
+```
+
+That third block is the point. Assertion messages here say *why the rule
+exists*, so a failure tells you what broke rather than only that something
+did.
+
+For anything the script under test printed while failing, open
+`tests/results/results.html` — every test carries its captured output, and
+the "Failures only" button collapses a 118-line run to the two that matter.
+`-ShowOutput` streams the same thing live if you are watching a hang.
+
+`-StopOnFail` stops at the first failure, which is what you want when one
+change has broken twenty tests and you only care about the first.
+
+### When a test fails and the test is wrong
+
+It happens, and it is worth being deliberate about. Ask which of these it is:
+
+1. **The pipeline regressed.** Fix the pipeline.
+2. **You changed behaviour on purpose.** Update the test *and* the reason in
+   its message — a test whose comment no longer matches what it checks is
+   worse than no test.
+3. **The test was wrong.** Fix it, then break the pipeline deliberately and
+   confirm the fixed test catches it. Every test in here that guards an
+   absence was checked that way, and one of them was passing for the wrong
+   reason until it was.
+
+What not to do is delete the test or weaken the assertion to get green. The
+suite's value is entirely in being trusted.
+
+### Running it on the other platforms
+
+The whole point of the shim/runner split is that the command is the same:
+
+```bash
+./tests/run-tests            # Ubuntu VM, macOS, any Linux
+tests\run-tests.cmd          # Windows 11
+```
+
+What to expect that is *not* a problem:
+
+- **Windows**: the three tests that shell out to `bash` skip (`bash -n`, and
+  the two POSIX-shim tests). The installer dry-run snapshots and restores
+  your user `Path`, because the installer legitimately writes to it.
+- **No ffmpeg**: the thumbnail, re-embed and live tests skip.
+- **No python3**: the whole viewer suite skips.
+
+Genuine platform failures are the ones worth having — the macOS and Windows
+branches of `run_ytdlp.ps1`, `postprocess.ps1` and the installer have never
+been executed on their real platforms. When one fails there, suspect the
+harness at least as much as the pipeline; both are equally unproven on that
+OS.
+
+**On each Linux family**, one test earns its keep by accident: *throttles the
+dependency check to once a day* runs the real dependency check once, which
+exercises the `/etc/os-release` family detection and the matching package
+manager query (`apt` / `dnf` / `pacman` / `zypper`). Running the suite on
+Fedora is the only thing that has ever executed the Fedora branch.
+
+### About "no network"
+
+The suite never touches YouTube, and nothing but the opt-in live suite
+downloads anything. It is not strictly offline, though: that same
+dependency-check test makes one HTTPS request to `github.com` (for the latest
+pwsh release) and asks the local package manager what is upgradable. Both are
+wrapped in `try`/`catch` and degrade to a logged warning, so the suite passes
+with no network — it just takes longer while DNS times out.
+
+### The live run
+
+`-Live` is the only thing that archives a real video, and it is the answer to
+"does the whole thing still work against YouTube as it is today" — extraction,
+signed format URLs, the real merge, real filename sanitisation. Worth running
+after a yt-dlp update, after touching `yt-dlp.conf`, or when a real download
+has started behaving oddly and you want to know whether the pipeline or
+YouTube changed.
+
+```bash
+./tests/run-tests -Live                              # ~100 comments, minutes
+./tests/run-tests -Live -LiveUrl 'https://youtu.be/<id>'
+./tests/run-tests -Live -LiveFullComments            # as long as that video normally takes
+```
+
+It leaves the archive in the temp directory and prints the path, which is the
+first thing to look at when the run was surprising.
+
+### Making it automatic
+
+The runner exits non-zero on failure, so nothing else is needed:
+
+```bash
+# .git/hooks/pre-commit  (chmod +x)
+#!/bin/sh
+exec ./tests/run-tests -NoReport
+```
+
+Two and a half minutes is a long pre-commit hook. A pre-push hook, or just
+running it by hand before you push, is usually the better trade — the suite
+is a gate on what reaches GitHub, not on what reaches your working tree.
+
+### When you add a feature, add the test first
+
+Not out of principle — because the fixtures make it cheap and because it
+forces you to say what the feature is supposed to do. A new `ytdl` option is
+three lines in `020-launcher`. A new thing `postprocess.ps1` writes is one
+`Assert-PathExists` in `050`. A new yt-dlp argument is one `Assert-Match`
+against `Get-StubCalls`. See "Adding a test" below for the shape.
+
+### What it will not catch
+
+Worth knowing so you do not over-trust a green run:
+
+- **Anything about the real YouTube** unless you pass `-Live`. Extractor
+  breakage, format changes, throttling — the stub always cooperates.
+- **Whether a downloaded video is actually correct.** Nothing checks that the
+  archived file plays, or that the merge picked the right streams.
+- **Behaviour under a real 40-hour channel archive.** The concurrency tests
+  use six processes and tiny files.
+- **The macOS and Windows branches, until you run it there.** Static checks
+  only, same caveat the pipeline carries.
+
 
 ## Skips are not failures
 
