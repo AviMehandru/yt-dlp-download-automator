@@ -280,6 +280,13 @@ pkg_install() {
 }
 
 mkdir -p "$LOCAL_BIN"
+# $LOCAL_BIN is where Steps 3-6 install yt-dlp, pwsh and Deno, but nothing
+# has put it on PATH yet -- the shell's PATH was fixed at login, and on a
+# fresh machine ~/.profile skipped it because the directory did not exist.
+# The persistent wiring happens in setup-common.ps1, which cannot run until
+# the pwsh check below passes, so without this the script deadlocks:
+# Step 4 installs pwsh successfully and the gate before Step 7 still fails.
+export PATH="${LOCAL_BIN}:${PATH}"
 
 # --- Step 1: update the system ---
 log "Updating system packages"
@@ -423,13 +430,11 @@ else
     #
     # Microsoft publishes repositories for only a handful of distributions,
     # and the coverage is uneven in ways that bite exactly where you would not
-    # want them to: there was no apt package for Ubuntu 26.04 for a long while
-    # (which is why this step used to fall back to snap), Arch has only an AUR
-    # package -- which cannot be installed non-interactively without dragging
-    # in an AUR helper -- and openSUSE's situation shifts between releases.
-    # Supporting four families through their package managers would mean four
-    # fragile code paths, each capable of breaking independently whenever
-    # Microsoft changed its publishing.
+    # want them to: a newly released Ubuntu routinely goes months with no apt
+    # package at all (which is why this step used to fall back to snap), Arch
+    # has only an AUR package -- which cannot be installed non-interactively
+    # without dragging in an AUR helper -- and openSUSE's situation shifts
+    # between releases.
     #
     # The tarball is one code path for every glibc distribution, needs no
     # root, adds no repository to the system, and is exactly how this script
@@ -444,7 +449,7 @@ else
     PWSH_DIR="${HOME}/.local/share/powershell"
     # Pinned fallback, used only if the "latest" lookup below cannot reach
     # GitHub. Bump it when convenient; it is a floor, not a ceiling.
-    PWSH_PINNED="7.4.6"
+    PWSH_PINNED="7.6.5"
 
     PWSH_ARCH=""
     case "$(uname -m)" in
