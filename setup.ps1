@@ -5,7 +5,7 @@
 .DESCRIPTION
     THIS SCRIPT IS HALF THE INSTALLER. It performs Steps 1-6 -- everything
     that has to talk to winget, plus installing pwsh itself -- and then
-    hands over to scripts\setup-common.ps1 for Steps 7-14, which it shares
+    hands over to scripts\setup-common.ps1 for Steps 7-15, which it shares
     byte-for-byte with the Unix bootstrap, setup.sh.
 
     WHY THE SPLIT LANDS THERE. It is not that these steps are the hard
@@ -15,7 +15,7 @@
     VM guest and is a no-op on Windows. Step 6 (desktop previews) is VLC
     via winget here, a Homebrew cask on macOS, and webp-pixbuf-loader plus
     ffmpegthumbnailer on Linux -- three implementations of one sentence
-    with no shared body to factor out. Steps 7-14 are the opposite:
+    with no shared body to factor out. Steps 7-15 are the opposite:
     fetching the project files, creating the folder tree, copying files
     into place, writing the launchers, wiring PATH and verifying are the
     same work on every platform, and used to be roughly 600 lines
@@ -40,7 +40,7 @@
     temporarily unavailable, a flaky network blip) is wrapped so a failure
     prints a clear WARNING and the script keeps going.
 
-    The one thing that IS fatal is pwsh: Steps 7-14 run under it, so if
+    The one thing that IS fatal is pwsh: Steps 7-15 run under it, so if
     Step 4 could not install it this script stops with an explanation
     rather than pretending. That is a change from the previous behavior,
     which went on to place files that could not be used -- run_ytdlp.ps1
@@ -103,7 +103,7 @@ Write-Host "Detected platform: windows"
 # takes. winget prints its own real progress for its own downloads, so this
 # only needs to answer "how far through the whole script am I".
 # $TotalSteps must match the number of Write-Step calls below.
-$TotalSteps = 14
+$TotalSteps = 15
 $script:CurrentStep = 0
 
 function Draw-ProgressBar {
@@ -118,7 +118,7 @@ function Draw-ProgressBar {
 }
 
 # Write-Step does double duty: per-step header AND step counter, so the
-# bar's count and the "Step N/14" numbering cannot drift apart -- there is
+# bar's count and the "Step N/15" numbering cannot drift apart -- there is
 # only one place that increments anything.
 function Write-Step {
     param([string]$Message)
@@ -273,7 +273,7 @@ if (Get-Command vlc -ErrorAction SilentlyContinue) {
 Write-Host "Explorer previews .webp thumbnails natively on Windows 10 1809+ and Windows 11 -- no thumbnailer packages needed."
 Write-Host "NOTE: Explorer does NOT generate poster-frame thumbnails for .mkv out of the box. If you want those, install a shell thumbnail extension such as Icaros -- nothing in the pipeline depends on it."
 
-# --- Hand off to the shared installer for Steps 7-14 ---
+# --- Hand off to the shared installer for Steps 7-15 ---
 # Everything from here -- curl_cffi, Deno, fetching the project files, the
 # folder tree, placing files, the launchers, PATH wiring and verification
 # -- is identical on Windows, Linux and macOS, and lives in
@@ -286,7 +286,7 @@ Write-Host "NOTE: Explorer does NOT generate poster-frame thumbnails for .mkv ou
 # processes read as one run.
 if (-not (Get-Command pwsh -ErrorAction SilentlyContinue)) {
     Write-Host ""
-    Write-Host "ERROR: pwsh (PowerShell 7) is not available, so Steps 7-14 cannot run."
+    Write-Host "ERROR: pwsh (PowerShell 7) is not available, so Steps 7-15 cannot run."
     Write-Host ""
     Write-Host "Those steps place the pipeline files and create the folder tree, but"
     Write-Host "every one of those files is a pwsh 7 script -- an install without pwsh"
