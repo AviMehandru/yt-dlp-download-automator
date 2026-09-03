@@ -1,0 +1,47 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ytdl-gui",
+  "version": "0.1.0",
+  "identifier": "com.avimehandru.ytdl-gui",
+  "build": {
+    "frontendDist": "../src"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "yt-dlp archive",
+        "width": 1320,
+        "height": 880,
+        "minWidth": 940,
+        "minHeight": 620,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: media: http://media.localhost; media-src 'self' blob: media: http://media.localhost; connect-src 'self' ipc: http://ipc.localhost media: http://media.localhost; font-src 'self'",
+      "assetProtocol": {
+        "enable": false
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Utility",
+    "shortDescription": "yt-dlp archival pipeline",
+    "longDescription": "Desktop front end for the yt-dlp archival pipeline: start downloads, watch progress, and browse the archive it produced.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png"
+    ],
+    "linux": {
+      "deb": {
+        "depends": []
+      }
+    }
+  }
+}
