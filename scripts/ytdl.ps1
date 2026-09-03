@@ -22,6 +22,21 @@
     extractor tells them apart, not this script, so nothing here (or in
     run_ytdlp.ps1) branches on URL type.
 
+    QUOTE IT. Every shell rewrites an unquoted URL before ytdl is started:
+    zsh (macOS's default) fails outright on the "?" in watch?v=...; bash
+    silently truncates at "&list=..." because "&" backgrounds the command;
+    PowerShell rejects "&" as a syntax error. No amount of care inside this
+    script can recover a command line the shell already changed, so the
+    quotes are the fix, on every platform:
+
+        ytdl "https://www.youtube.com/watch?v=-QMgcOSyf-o&list=PLabc"
+
+    A leading hyphen in the URL or video id, on the other hand, IS handled
+    here: YouTube ids are base64url and about one in thirty starts with "-"
+    or "_", the first argument is taken as the URL even when it starts with
+    a hyphen, and every yt-dlp invocation in the pipeline passes "--" ahead
+    of the URL so yt-dlp cannot mistake it for an option either.
+
 .NOTES
     Options (any order, after the URL and optional path):
 
@@ -62,13 +77,18 @@
     relative path is resolved to an absolute one by run_ytdlp.ps1.
 
 .EXAMPLE
-    ytdl https://www.youtube.com/watch?v=dQw4w9WgXcQ
+    ytdl "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
 .EXAMPLE
-    ytdl https://www.youtube.com/@SomeChannel/videos --sync --workers 3
+    ytdl "https://www.youtube.com/@SomeChannel/videos" --sync --workers 3
 
 .EXAMPLE
-    ytdl https://www.youtube.com/@SomeChannel/videos --path "D:\Archive" --items 1-20
+    ytdl "https://www.youtube.com/@SomeChannel/videos" --path "D:\Archive" --items 1-20
+
+.EXAMPLE
+    # A video id starting with a hyphen -- an ordinary base64url id, not a
+    # special case you have to work around.
+    ytdl "https://youtu.be/-QMgcOSyf-o"
 #>
 
 # Deliberately NOT declared with a param() block of named parameters.
@@ -118,7 +138,74 @@ if ($argList.Count -eq 0 -or [string]::IsNullOrWhiteSpace($argList[0])) {
     exit 1
 }
 
+# Every option spelling the switch below accepts. The switch still needs
+# its own per-option cases (each one does something different), so this is
+# a mirror of that list rather than its source -- but it is a mirror with
+# a test behind it: 020-launcher asserts the two agree, so adding an
+# option to the switch without adding it here fails the suite rather than
+# quietly leaving the guard below out of date.
+$knownOptions = @("--sync", "--items", "--after", "--lazy", "--workers", "--path")
+
+# The first argument is the URL, INCLUDING when it starts with a hyphen.
+#
+# YouTube video ids are base64url, so roughly one in thirty starts with
+# "-" or "_": "-QMgcOSyf-o" is an ordinary id, not a malformed one. A
+# full URL built from such an id is harmless here (it starts with "h"),
+# but a bare id typed on its own -- `ytdl -QMgcOSyf-o` -- is not, and
+# neither is anything downstream that hands the value to yt-dlp as a bare
+# positional argument. That downstream half is fixed by the `--`
+# end-of-options marker now present at every yt-dlp call site (see the
+# long note in run_ytdlp.ps1); this half is the rule that a leading hyphen
+# does NOT by itself mean "option".
+#
+# Which leaves one case that must not be swallowed silently: an actual
+# option in the URL's position, i.e. the user wrote the options first and
+# forgot the URL. Before, `ytdl --sync https://...` took "--sync" as the
+# URL and the real URL as the legacy positional download path, then
+# started a doomed download into a directory named after a YouTube link --
+# a wrong run rather than an error message. It is now a clean failure.
+if ($knownOptions -contains $argList[0]) {
+    Write-Usage "Error: the first argument must be the URL -- '$($argList[0])' is an option.`n$usage"
+    exit 1
+}
+
 $url = $argList[0]
+
+# A URL is only "funky" from a shell's point of view, and by the time this
+# script runs the shell has already had its way with the command line.
+# Three mangles this script CANNOT undo, because they happen before pwsh
+# is even started:
+#
+#   zsh (the default shell on macOS) treats "?" as a glob character, so an
+#   unquoted https://www.youtube.com/watch?v=... fails outright with
+#   "zsh: no matches found" and ytdl never runs at all.
+#
+#   bash passes "?" through, but "&" -- as in "&list=PL..." or "&t=42" --
+#   is a control operator: it backgrounds the command and silently
+#   truncates the URL at that point, so the archive quietly gets the video
+#   without the playlist.
+#
+#   PowerShell rejects an unquoted "&" as a syntax error.
+#
+# The cure for all three is the same and belongs to the user: quote the
+# URL. What this script can do is notice when the argument it was handed
+# does not look like a URL at all -- the usual sign that a glob expanded
+# to filenames, or that a paste arrived in pieces -- and name quoting as
+# the fix, instead of letting yt-dlp fail several layers down with an
+# extractor error that reads like a YouTube problem.
+#
+# Deliberately a WARNING, not a rejection, and deliberately narrow: it
+# stays quiet for anything containing "://" or a YouTube host or shaped
+# like a bare 11-character video id, which covers every form that reaches
+# yt-dlp intact today. Being wrong in the noisy direction costs a line of
+# stderr; being wrong in the rejecting direction would break a command
+# that used to work.
+if ($url -notmatch '://' -and
+    $url -notmatch '(?i)youtube\.com|youtu\.be' -and
+    $url -notmatch '^[\w-]{11}$') {
+    Write-Usage "Warning: '$url' does not look like a YouTube URL. If you pasted one, quote it -- an unquoted URL containing ? or & is rewritten by the shell before ytdl sees it. Continuing anyway."
+}
+
 # The OUTER @() here is load-bearing, not decorative. PowerShell unrolls
 # the result of an if-expression through the pipeline, so a branch that
 # returns a ONE-element array yields that element as a bare scalar rather

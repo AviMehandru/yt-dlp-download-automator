@@ -160,6 +160,28 @@ Describe 'run_ytdlp.ps1 session orchestration' {
         } finally { Remove-TestRoot $r }
     }
 
+    It 'hands yt-dlp a hyphen-leading URL behind an end-of-options marker' {
+        # 030-config asserts the "--" is written at every call site. This
+        # asserts it SURVIVES: PowerShell gives "--" its own meaning when
+        # binding cmdlet parameters, and only passes it through as a literal
+        # argument because yt-dlp is a native command. Reading the source
+        # cannot tell those two apart -- running it can, which is what this
+        # does, by reading the arguments a stub yt-dlp was actually handed.
+        $dashUrl = 'https://www.youtube.com/watch?v=-QMgcOSyf-o'
+        $r = New-OrchestratorRoot -Label 'dashurl' -Behavior $downloadBehavior
+        try {
+            $null = Invoke-RunYtdlp -TestRoot $r -Url $dashUrl
+            $download = @(Get-StubCalls -TestRoot $r -Name 'yt-dlp' |
+                          Where-Object { $_.line -match '--download-archive' }) | Select-Object -First 1
+            Assert-True ($null -ne $download) 'no download invocation was recorded'
+
+            $argv = @($download.args)
+            Assert-Equal $dashUrl $argv[-1] 'the URL must be the last argument, unaltered'
+            Assert-Equal '--' $argv[-2] `
+                'the end-of-options marker must reach yt-dlp as a real argument, immediately before the URL'
+        } finally { Remove-TestRoot $r }
+    }
+
     It 'counts distinct video ids in the session summary, not matching lines' {
         # A real single-video run prints several "[youtube] <id>: Downloading"
         # lines -- webpage, player API JSON, m3u8 -- and a plain line count

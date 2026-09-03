@@ -401,6 +401,15 @@ try {
             # below, not a hunch: watch for retry/incomplete-data lines, and for
             # the seconds-per-request figure logged at the end of this pass
             # drifting well above the sleep value.
+            # The `--` before $originalUrl is the end-of-options marker; see
+            # the long note at the single-stream call in run_ytdlp.ps1 for
+            # why every yt-dlp invocation in this pipeline that takes a URL
+            # carries one. It matters here even though $originalUrl comes
+            # out of the info.json rather than off a command line: this pass
+            # re-extracts the video, so an id beginning with a hyphen would
+            # cost the comments of a video that had otherwise downloaded
+            # perfectly -- a partial archive rather than a loud failure,
+            # which is the worse of the two outcomes.
             $commentsSw = [System.Diagnostics.Stopwatch]::StartNew()
             $commentsOutput = & yt-dlp `
                 --ignore-config `
@@ -411,6 +420,7 @@ try {
                 --retry-sleep "extractor:exp=1:30:2" `
                 --sleep-requests 0.25 `
                 -o (Join-Path $commentsTempDir "comments.%(ext)s") `
+                -- `
                 $originalUrl 2>&1 | ForEach-Object {
                     Log "  [comments] $_"
                     $_
@@ -894,6 +904,9 @@ try {
                 # on Windows) so this works whichever OS this happens to run on.
                 Remove-Item -Path (Join-Path $channelInfoDir "*") -Recurse -Force -ErrorAction SilentlyContinue
 
+                # `--` again, same rule as the comments pass above. A channel
+                # URL built from a custom handle (/@-SomeChannel) is the case
+                # this one guards.
                 & yt-dlp `
                     --ignore-config `
                     --skip-download `
@@ -903,6 +916,7 @@ try {
                     --write-all-thumbnails `
                     --write-description `
                     -o (Join-Path $channelInfoDir "channel.%(ext)s") `
+                    -- `
                     $channelUrl 2>&1 | ForEach-Object { Log "  [channel-info] $_" }
 
                 Set-Content -Path $throttleMarker -Value (Get-Date -Format "o")

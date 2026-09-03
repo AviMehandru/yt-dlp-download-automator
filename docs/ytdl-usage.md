@@ -39,6 +39,49 @@ flag's own section below.)
 Any URL yt-dlp itself understands: `watch?v=`, `youtu.be/`, `/shorts/`,
 `/playlist?list=`, `/@handle/videos`, `/channel/UC.../videos`, etc.
 
+**Quote it.** Always, on every platform:
+
+```
+ytdl "https://www.youtube.com/watch?v=-QMgcOSyf-o&list=PLabc123"
+```
+
+This is not style advice. Your shell rewrites an unquoted URL *before*
+`ytdl` is started, and each one does it differently:
+
+| Shell | What an unquoted URL does |
+|---|---|
+| zsh (macOS default) | `?` is a glob character. `watch?v=...` fails with `zsh: no matches found` and `ytdl` never runs. |
+| bash | `?` is passed through, but `&` backgrounds the command: `...&list=PL...` is silently **truncated** at the `&`, so you archive the one video and never learn the playlist was dropped. |
+| PowerShell | `&` is a reserved character and the command is a syntax error. |
+| cmd.exe | Fine — `ytdl.cmd` passes `%*` through unsplit precisely so `=` survives. |
+
+Nothing inside `ytdl` can undo any of these; by the time it runs, the
+command line has already been changed. If the first argument doesn't look
+like a URL at all, `ytdl` prints a warning naming quoting as the fix and
+continues anyway — a hint, not a gate.
+
+#### Hyphens in video ids are handled
+
+A separate problem, and this one *is* fixed in the pipeline. YouTube ids
+are base64url, so roughly one in thirty starts with `-` or `_`;
+`-QMgcOSyf-o` is a perfectly ordinary id. yt-dlp reads any argument
+beginning with `-` as an option, wherever it appears, and fails with a
+bare `Usage: yt-dlp [OPTIONS] URL [URL...]` that names nothing.
+
+So every yt-dlp invocation in the pipeline now passes `--` (end of
+options) immediately before the URL, and `ytdl` treats a hyphen-leading
+first argument as the URL rather than an option. Both of these work:
+
+```
+ytdl "https://youtu.be/-QMgcOSyf-o"
+ytdl -QMgcOSyf-o
+```
+
+The one thing a leading hyphen can no longer do is stand in for a missing
+URL: `ytdl --sync "<url>"` is now a clean error. Previously it took
+`--sync` as the URL and your actual URL as the download path, and started
+a doomed run without complaining. Options go **after** the URL.
+
 ### `[download-root-path]` (optional, positional)
 
 If given as the argument immediately after the URL, it replaces the
@@ -295,13 +338,22 @@ accumulate on a very large channel run.
 
 For anyone reading the script directly rather than this doc:
 
-1. `$1` is always the URL. Missing → usage error, exit.
-2. After the URL, if the *next* remaining argument doesn't start with
+1. `$1` is always the URL, **including when it starts with `-`** — a
+   leading hyphen does not mean "option" in this position, because
+   `-QMgcOSyf-o` is a legitimate video id. Missing → usage error, exit.
+2. The single exception to rule 1: if `$1` is exactly one of the known
+   option spellings (`--sync`, `--items`, `--after`, `--lazy`,
+   `--workers`, `--path`), it's a missing-URL error rather than a URL.
+3. If `$1` doesn't look like a URL or a bare 11-character video id, a
+   warning about quoting goes to stderr and the run continues.
+4. After the URL, if the *next* remaining argument doesn't start with
    `--`, it's consumed as the legacy positional path.
-3. Everything after that is parsed as `--flag [value]` pairs, in any
+5. Everything after that is parsed as `--flag [value]` pairs, in any
    order, until arguments run out.
-4. An unrecognized `--something` is a hard error (exits with a usage
+6. An unrecognized `--something` is a hard error (exits with a usage
    message) rather than being silently ignored or passed through.
+7. Whatever survives as the URL reaches yt-dlp after a `--` end-of-options
+   marker, at every call site in the pipeline.
 
 ---
 

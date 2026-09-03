@@ -85,6 +85,107 @@ param(
         Assert-False $r.Params.BreakOnExisting
     }
 
+    # --- Hyphen-leading URLs and ids ---------------------------------------
+    #
+    # YouTube ids are base64url, so "-QMgcOSyf-o" is an ordinary id and about
+    # one in thirty starts with "-" or "_". Everything in the argument path
+    # that could mistake such an id for an option is covered here; the other
+    # half of the fix -- the "--" end-of-options marker on every yt-dlp
+    # invocation -- is asserted in 030-config and 040-run-ytdlp, because that
+    # is where the yt-dlp command line is actually built.
+    $dashUrl = 'https://www.youtube.com/watch?v=-QMgcOSyf-o'
+
+    It 'passes a URL whose video id starts with a hyphen through untouched' {
+        $r = Invoke-Launcher -Arguments @($dashUrl)
+        Assert-Equal 0 $r.ExitCode
+        Assert-Equal $dashUrl $r.Params.Url 'a hyphen inside the URL must not turn it into an option'
+    }
+
+    It 'treats a bare hyphen-leading video id as the URL, not as an option' {
+        # `ytdl -QMgcOSyf-o`. The launcher must not reject this, and -- the
+        # part that is easy to get wrong -- pwsh's own -File binder must
+        # still hand it to run_ytdlp.ps1 as the VALUE of -Url rather than
+        # reading it as a second parameter name.
+        $r = Invoke-Launcher -Arguments @('-QMgcOSyf-o')
+        Assert-Equal 0 $r.ExitCode 'a leading hyphen alone must not be a usage error'
+        Assert-Equal '-QMgcOSyf-o' $r.Params.Url
+    }
+
+    It 'still accepts a hyphen-leading URL alongside a path and options' {
+        $r = Invoke-Launcher -Arguments @($dashUrl, '/tmp/dash root', '--sync', '--workers', '4')
+        Assert-Equal 0 $r.ExitCode
+        Assert-Equal $dashUrl $r.Params.Url
+        Assert-Equal '/tmp/dash root' $r.Params.DataRoot
+        Assert-True $r.Params.BreakOnExisting
+        Assert-Equal 4 $r.Params.Workers
+    }
+
+    It 'rejects an option in the URL position instead of downloading nothing' {
+        # `ytdl --sync <url>` used to take "--sync" as the URL and the real
+        # URL as the legacy positional download root: a doomed run into a
+        # directory named after a YouTube link, with no error. Now that a
+        # leading hyphen no longer implies "option", this has to be caught
+        # explicitly.
+        $r = Invoke-Launcher -Arguments @('--sync', $url)
+        Assert-Equal 1 $r.ExitCode 'a missing URL must fail, not start a wrong run'
+        Assert-Match 'first argument must be the URL' $r.Output
+        Assert-True ($null -eq $r.Params) 'run_ytdlp.ps1 must not be started at all'
+    }
+
+    It 'keeps the missing-URL guard in step with the options the parser accepts' {
+        # $knownOptions in ytdl.ps1 mirrors the switch cases rather than
+        # driving them, so this asserts the mirror. Without it, adding an
+        # option to the switch and forgetting the list would silently
+        # restore the wrong-run behaviour above for that one option.
+        $src = Get-Content -LiteralPath (Join-Path $root.InstallRoot 'scripts/ytdl.ps1') -Raw
+
+        $listed = @()
+        if ($src -match '(?m)^\$knownOptions\s*=\s*@\((.*?)\)') {
+            $listed = @([regex]::Matches($matches[1], '"(--[a-z]+)"') |
+                        ForEach-Object { $_.Groups[1].Value } | Sort-Object)
+        }
+        Assert-True ($listed.Count -gt 0) '$knownOptions could not be read out of ytdl.ps1'
+
+        # The switch cases, read the same way: every quoted "--option" that
+        # appears as a case label in the parsing loop.
+        $cases = @([regex]::Matches($src, '(?m)^\s{8}"(--[a-z]+)"\s*\{') |
+                   ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+        Assert-True ($cases.Count -gt 0) 'no switch cases could be read out of ytdl.ps1'
+
+        Assert-Equal ($cases -join ',') ($listed -join ',') `
+            '$knownOptions and the parser switch have drifted apart'
+    }
+
+    It 'warns, but still runs, when the first argument does not look like a URL' {
+        # The one thing this script can say about shell-mangled URLs. zsh
+        # kills an unquoted "watch?v=..." before ytdl is ever started and
+        # bash truncates at "&", so neither is detectable here -- but an
+        # argument that reaches us looking nothing like a URL is the visible
+        # residue of a paste that went wrong, and naming quoting at that
+        # moment beats an extractor error several layers down. A warning
+        # rather than a rejection on purpose: guessing wrong must not break
+        # a command that used to work.
+        $r = Invoke-Launcher -Arguments @('watch-v-abc.html')
+        Assert-Equal 0 $r.ExitCode 'the warning must not block the run'
+        Assert-Match 'does not look like a YouTube URL' $r.Output
+        Assert-Match 'quote it' $r.Output
+        Assert-Equal 'watch-v-abc.html' $r.Params.Url 'the argument must still be passed through unchanged'
+    }
+
+    It 'stays silent for every URL shape that already worked' {
+        foreach ($good in @(
+            $url, $dashUrl, '-QMgcOSyf-o',
+            'https://youtu.be/-QMgcOSyf-o',
+            'youtu.be/-QMgcOSyf-o',
+            'https://www.youtube.com/@SomeChannel/videos',
+            'https://music.youtube.com/watch?v=dQw4w9WgXcQ'
+        )) {
+            $r = Invoke-Launcher -Arguments @($good)
+            Assert-NotMatch 'does not look like a YouTube URL' $r.Output `
+                "the shape warning must not fire on '$good'"
+        }
+    }
+
     It 'accepts the legacy positional path as the only extra argument' {
         # The regression case. Exactly ONE argument after the URL is what
         # collapsed $rest from an array into a bare string.

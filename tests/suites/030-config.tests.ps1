@@ -183,4 +183,42 @@ there is. Template segment was: $($segments[1])
             }
         }
     }
+
+    It 'every extracting yt-dlp invocation ends with "--" before its URL' {
+        # The end-of-options marker, checked structurally for the same reason
+        # --ignore-config is: it is the kind of thing that gets dropped when
+        # a call site is copied and edited, and nothing fails until the one
+        # video whose id happens to start with a hyphen.
+        #
+        # YouTube ids are base64url, so about one in thirty starts with "-"
+        # or "_" -- "-QMgcOSyf-o" is an ordinary id. yt-dlp parses with
+        # optparse, which reads ANY argument beginning with "-" as an option
+        # wherever it appears, and the failure is a bare "Usage: yt-dlp
+        # [OPTIONS] URL [URL...]" that names nothing. "--" ends option
+        # parsing, costs nothing on an ordinary URL, and makes the whole
+        # class of bug impossible.
+        #
+        # The invariant is positional, not just "contains --": the marker
+        # only protects arguments that come AFTER it, so it must be the
+        # second-to-last element, immediately before the URL.
+        foreach ($rel in @('scripts/run_ytdlp.ps1', 'scripts/postprocess.ps1')) {
+            $path = Join-Path $script:RepoRoot $rel
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$null)
+            $commands = @($ast.FindAll({
+                $args[0] -is [System.Management.Automation.Language.CommandAst] -and
+                $args[0].GetCommandName() -eq 'yt-dlp'
+            }, $true))
+
+            foreach ($cmd in $commands) {
+                $argv = @($cmd.CommandElements | Select-Object -Skip 1 | ForEach-Object { $_.Extent.Text })
+                # Same two exemptions as above: neither takes a URL at all.
+                $isInformational = ($argv.Count -eq 1) -and ($argv[0] -in @('-U', '--version'))
+                if ($isInformational) { continue }
+
+                if ($argv.Count -lt 2 -or $argv[-2] -ne '--') {
+                    throw "$rel line $($cmd.Extent.StartLineNumber): this yt-dlp invocation does not pass '--' immediately before its URL, so a video id beginning with a hyphen would be read as an option and the run would die on a usage message. Last two arguments were: $(($argv | Select-Object -Last 2) -join ' ')"
+                }
+            }
+        }
+    }
 }

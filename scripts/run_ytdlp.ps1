@@ -524,6 +524,34 @@ if ($Workers -le 1) {
     # Chaining a second Tee-Object -FilePath after the -Variable one keeps
     # both: the file gets written to, the console still streams live, and
     # $sessionOutput is populated for the summary below.
+    #
+    # The bare `--` on the second-to-last line is the end-of-options marker,
+    # and it is the reason a URL whose video id starts with a hyphen works
+    # here. YouTube ids are base64url, so "-QMgcOSyf-o" and "_x1-abcdefg"
+    # are perfectly ordinary ids, and yt-dlp parses its command line with
+    # optparse: without `--`, an argument beginning with "-" is read as an
+    # option no matter where it sits, and the run dies with a bare "Usage:
+    # yt-dlp [OPTIONS] URL [URL...]" that says nothing about which argument
+    # was at fault. `--` says "everything after this is a positional
+    # argument", which is exactly what a URL is. It costs nothing on a
+    # normal URL (verified: yt-dlp extracts identically with and without
+    # it), so every yt-dlp invocation in this pipeline that takes a URL now
+    # has one -- see the enumeration and worker calls below, and the
+    # comments and Channel Info passes in postprocess.ps1.
+    #
+    # PowerShell passes a bare `--` through to a NATIVE command as a plain
+    # literal argument (its own end-of-parameters meaning applies to
+    # cmdlets, not to native command lines), including across the backtick
+    # continuations used here -- also verified rather than assumed.
+    #
+    # What this does NOT fix, because it happens before this script exists:
+    # the shell eating the URL first. An unquoted "watch?v=..." is a glob in
+    # zsh (macOS's default shell), which fails the command outright with
+    # "no matches found"; an unquoted "&list=..." backgrounds the command in
+    # bash and truncates the URL; and "&" is a syntax error in PowerShell.
+    # Quoting the URL is the only cure for those, so ytdl.ps1 detects what
+    # it can of the aftermath and says so plainly, and docs/ytdl-usage.md
+    # spells out the rule.
     & yt-dlp `
         --ignore-config `
         --config-location $confFile `
@@ -533,6 +561,7 @@ if ($Workers -le 1) {
         @jsRuntimeArgs `
         --exec $execCmd `
         @playlistArgs `
+        -- `
         $Url 2>&1 | Tee-Object -Variable sessionOutput | Tee-Object -FilePath $logFile -Append
 
     # --- Session summary ---
@@ -581,7 +610,10 @@ if ($Workers -le 1) {
     $enumArgs = @()
     if ($PlaylistItems) { $enumArgs += @("--playlist-items", $PlaylistItems) }
     if ($DateAfter)      { $enumArgs += @("--dateafter", $DateAfter) }
-    $enumOutput = & yt-dlp --ignore-config --flat-playlist --skip-download --print "%(id)s" @enumArgs $Url 2>&1
+    # `--` before $Url for the same reason as the single-stream call above:
+    # a channel or playlist URL is a positional argument, and one whose id
+    # begins with a hyphen must not be read as an option.
+    $enumOutput = & yt-dlp --ignore-config --flat-playlist --skip-download --print "%(id)s" @enumArgs -- $Url 2>&1
     $enumOutput | ForEach-Object { "  [enumerate] $_" | Tee-Object -FilePath $logFile -Append }
     # yt-dlp's --print output is one id per line; anything else mixed into
     # 2>&1 (warnings, progress) won't match this shape, so a simple filter
@@ -691,6 +723,15 @@ if ($Workers -le 1) {
             $workerLogName = "download.worker-$id.log"
             $workerLogFile = Join-Path $logsDir $workerLogName
             $workerExecCmd = "after_move:pwsh -NoProfile -File `"$(Join-Path $scriptsRoot 'postprocess.ps1')`" -FilePath %(filepath)q -LogFileName `"$workerLogName`""
+            # A worker's URL is BUILT here from an enumerated id rather than
+            # typed by anyone, which makes the hyphen case more likely, not
+            # less: enumeration hands back whatever ids the channel has, and
+            # roughly one YouTube id in thirty starts with "-" or "_". The
+            # https:// prefix means this particular string can never look
+            # like an option, but the `--` below is kept for the same reason
+            # as everywhere else -- one rule, applied at every call site,
+            # rather than a per-call judgement about whether this one is
+            # safe.
             $videoUrl = "https://youtu.be/$id"
 
             "==== Download session started (worker, video $id) $(Get-Date -Format o) ====" | Set-Content -Path $workerLogFile
@@ -703,6 +744,7 @@ if ($Workers -le 1) {
                 --paths "temp:$incompleteDir" `
                 @jsRuntimeArgs `
                 --exec $workerExecCmd `
+                -- `
                 $videoUrl 2>&1 | Tee-Object -Variable workerOutput | Add-Content -Path $workerLogFile
 
             "==== Download session finished (worker, video $id) $(Get-Date -Format o) ====" | Add-Content -Path $workerLogFile
