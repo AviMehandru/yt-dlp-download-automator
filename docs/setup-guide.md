@@ -515,7 +515,7 @@ subtitles — tracks muxed into the `.mkv` by `--embed-subs`, and the sidecar
 
 ---
 
-# Steps 7–12: the shared half
+# Steps 7–14: the shared half
 
 From here the installer is one file, `scripts/setup-common.ps1`, running under
 the `pwsh` installed in Step 4. The manual commands below still differ by
@@ -602,7 +602,28 @@ confusingly.
 
 ---
 
-## Step 9: Get the project files
+## Step 9: Install Node.js
+
+The PO token provider is a Node application, so Node has to exist before it
+can be built. This is a *different* need from Deno in Step 8, and the two
+are not interchangeable:
+
+| | Deno (Step 8) | Node (Step 9) |
+|---|---|---|
+| Runs | YouTube's cipher/nsig challenge, inside yt-dlp | the `bgutil-ytdlp-pot-provider` server |
+| Shape | a self-contained script yt-dlp hands to any JS runtime | a real application with an npm dependency tree and a TypeScript build |
+| If missing | 403s and missing formats | no PO tokens, so downloads fall back to yt-dlp's default clients |
+
+The installer uses an existing `node` on `PATH` if it is v18 or newer, and
+otherwise downloads the current LTS tarball from nodejs.org into
+`<install root>/node`. Nothing is installed system-wide and nothing needs
+root, matching how yt-dlp and Deno are already handled.
+
+If this step fails, setup continues. You get a working archiver that runs
+on yt-dlp's default clients — see **PO tokens and degraded mode** below for
+exactly what that costs you.
+
+## Step 10: Get the project files
 
 If you are following this guide by hand you already have the files in front of
 you, and there is nothing to do here. The installer's version of this step
@@ -629,7 +650,7 @@ beside the installer.
 
 ---
 
-## Step 10: Create the folder structure
+## Step 11: Create the folder structure
 
 **Linux and macOS**
 
@@ -658,7 +679,7 @@ run has nothing to report.
 
 ---
 
-## Step 11: Place the project files
+## Step 12: Place the project files
 
 ### What goes where
 
@@ -770,7 +791,26 @@ Open a new terminal for this to take effect.
 
 ---
 
-## Step 12: Verify
+## Step 13: Build the PO token provider
+
+Runs after Step 12 because the thing that does the work — `pot-provider.ps1`
+— is one of the files Step 12 places.
+
+This step downloads the provider at a pinned version, builds it with
+`npm ci && npx tsc`, installs the matching yt-dlp plugin from PyPI, starts
+the local server on port 4416, and asks it for a token to confirm the whole
+chain works. The plugin and the server must be the same version, so the
+installer resolves one version number and uses it for both.
+
+Re-check it at any time:
+
+```
+pwsh -File "<install root>/scripts/pot-provider.ps1" -Status
+```
+
+A failure here is a warning, not a fatal error. See below.
+
+## Step 14: Verify
 
 **Linux and macOS**
 
@@ -875,6 +915,103 @@ Get-Content "Video metadata\checksums.sha256" | ForEach-Object {
 ```
 
 Every line should read `OK`.
+
+## PO tokens and degraded mode
+
+YouTube asks certain clients to attach a *proof-of-origin* (PO) token — a
+per-video attestation produced by running Google's BotGuard JavaScript.
+Which clients this pipeline can use depends entirely on whether it can
+produce one.
+
+### Why this matters more than it sounds like it should
+
+yt-dlp's unauthenticated default clients are exactly two: `android_vr` and
+`web_safari`. `android_vr` needs no token; `web_safari` needs a GVS token.
+Before PO token support existed here, this pipeline supplied no tokens — so
+`android_vr` was doing every download and `web_safari` could not complete
+one at all. The fallback list had one working entry, and it was the client
+with the open upstream 403 bug ([yt-dlp#17456][17456]).
+
+With a working provider, `run_ytdlp.ps1` passes:
+
+```
+--extractor-args youtube:player_client=tv_simply,web_safari,android_vr
+```
+
+`tv_simply` needs a token, does not need cookies, and is not subject to the
+`tv` client's "everything is DRM'd without cookies" problem. `web_safari`
+needs a token for most formats but uniquely also offers HLS formats that
+need none, so it is useful even when token generation is shaky.
+`android_vr` stays last: it fails *differently* from the other two, which
+is the entire value of a fallback.
+
+### What happens when the provider breaks
+
+Being honest about the limit: when YouTube changes BotGuard and upstream has
+not yet shipped a fix, **nothing on your machine can produce a token**.
+There is no local repair. What the pipeline does instead is notice quickly
+and avoid doing permanent damage:
+
+1. Health-check the provider before any download starts.
+2. If it fails, update the provider and yt-dlp together and re-test.
+3. If that fails, roll back to the last version pair that passed.
+4. If that fails, **degrade**: run on yt-dlp's default clients, exactly as
+   this pipeline behaved before PO tokens existed.
+
+### The archive-contamination problem, and the fix
+
+A degraded run still downloads real videos — just possibly at lower quality,
+missing formats, or skipping "made for kids" videos that `android_vr` cannot
+see. If those IDs landed in `archive.txt`, every future run would skip them
+as already archived, and your archive would permanently hold the worse copy
+with nothing recording which entries were affected.
+
+So a degraded session lets yt-dlp **read** the real archive (already-done
+videos are still skipped correctly) while **writing** to a throwaway copy.
+Afterwards the difference is appended to:
+
+```
+Archive Logs/Logs/needs-refetch.txt
+```
+
+one tab-separated line per video: timestamp, archive entry, and the reason
+the session was degraded.
+
+### Paying off the refetch debt
+
+Once `pot-provider.ps1 -Status` reports a healthy provider:
+
+```bash
+# See what is outstanding
+cat "<data root>/Archive Logs/Logs/needs-refetch.txt"
+
+# Re-fetch one of them. The video ID is the second field of each line.
+ytdl "https://youtu.be/<id>"
+```
+
+Because the degraded download was never recorded in `archive.txt`, the
+re-fetch is not skipped. The files already on disk are deliberately left
+alone — a degraded copy of a video is still a copy, and deleting it would
+mean an outage produces nothing at all. Move or delete the old per-video
+folder yourself first if you want the re-fetch to land completely clean,
+since `--no-overwrites` will otherwise keep whatever is already there.
+
+Nothing prunes `needs-refetch.txt` automatically; it is an append-only
+ledger, and you clear entries when you have dealt with them.
+
+### Turning it off
+
+```bash
+ytdl "<url>" --no-pot             # run on yt-dlp's defaults (still degraded-mode safe)
+ytdl "<url>" --skip-pot-update    # use the provider if it works, but don't try to fix it
+ytdl "<url>" --pot-port 8080      # if something else holds 4416
+```
+
+`--no-pot` still triggers degraded-mode archive handling, because what that
+protects against is "this run may not be full quality" — equally true
+whether the provider is broken or deliberately skipped.
+
+[17456]: https://github.com/yt-dlp/yt-dlp/issues/17456
 
 ## Read what you archived
 

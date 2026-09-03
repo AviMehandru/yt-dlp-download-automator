@@ -21,6 +21,7 @@ Describe 'Static analysis' {
 
     $psFiles = @(
         'scripts/run_ytdlp.ps1', 'scripts/postprocess.ps1', 'scripts/ytdl.ps1',
+        'scripts/pot-provider.ps1',
         'scripts/setup-common.ps1', 'setup.ps1',
         'tests/run-tests.ps1', 'tests/lib/Harness.ps1', 'tests/lib/Fixtures.ps1', 'tests/lib/Report.ps1'
     )

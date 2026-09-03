@@ -130,7 +130,7 @@ if (-not [string]::IsNullOrWhiteSpace($env:YTDLP_INSTALL_ROOT)) {
     $installRoot = Join-Path $HOME "yt-dlp"
 }
 
-$usage = "Usage: ytdl <youtube-url> [download-root-path] [--sync] [--items RANGE] [--after YYYYMMDD] [--lazy] [--workers N] [--path PATH]"
+$usage = "Usage: ytdl <youtube-url> [download-root-path] [--sync] [--items RANGE] [--after YYYYMMDD] [--lazy] [--workers N] [--path PATH] [--no-pot] [--skip-pot-update] [--pot-port N]"
 
 $argList = @($args)
 if ($argList.Count -eq 0 -or [string]::IsNullOrWhiteSpace($argList[0])) {
@@ -144,7 +144,7 @@ if ($argList.Count -eq 0 -or [string]::IsNullOrWhiteSpace($argList[0])) {
 # a test behind it: 020-launcher asserts the two agree, so adding an
 # option to the switch without adding it here fails the suite rather than
 # quietly leaving the guard below out of date.
-$knownOptions = @("--sync", "--items", "--after", "--lazy", "--workers", "--path")
+$knownOptions = @("--sync", "--items", "--after", "--lazy", "--workers", "--path", "--no-pot", "--skip-pot-update", "--pot-port")
 
 # The first argument is the URL, INCLUDING when it starts with a hyphen.
 #
@@ -224,6 +224,9 @@ $playlistItems   = ""
 $dateAfter       = ""
 $lazyPlaylist    = $false
 $workers         = ""
+$noPot           = $false
+$skipPotUpdate   = $false
+$potPort         = ""
 
 # Backward compatibility with the old positional form: if the first
 # remaining argument does not start with "--", treat it as the legacy
@@ -273,6 +276,26 @@ while ($i -lt $rest.Count) {
             $customPath = $rest[$i + 1]
             $i += 2
         }
+        "--no-pot" {
+            $noPot = $true
+            $i++
+        }
+        "--skip-pot-update" {
+            $skipPotUpdate = $true
+            $i++
+        }
+        "--pot-port" {
+            if ($i + 1 -ge $rest.Count) { Write-Usage "Error: --pot-port requires a port number"; exit 1 }
+            $potPort = $rest[$i + 1]
+            # Same reasoning as --workers above: validated here so a typo
+            # produces a clear message rather than a parameter-binding
+            # error from run_ytdlp.ps1's [ValidateRange(1024,65535)].
+            if ($potPort -notmatch '^\d+$' -or [int]$potPort -lt 1024 -or [int]$potPort -gt 65535) {
+                Write-Usage "Error: --pot-port requires a port between 1024 and 65535 (got: '$potPort')"
+                exit 1
+            }
+            $i += 2
+        }
         default {
             Write-Usage "Unknown option: $($rest[$i])`n$usage"
             exit 1
@@ -290,6 +313,9 @@ if ($playlistItems)  { $pwshArgs += @("-PlaylistItems", $playlistItems) }
 if ($dateAfter)      { $pwshArgs += @("-DateAfter", $dateAfter) }
 if ($lazyPlaylist)   { $pwshArgs += "-LazyPlaylist" }
 if ($workers)        { $pwshArgs += @("-Workers", $workers) }
+if ($noPot)          { $pwshArgs += "-NoPot" }
+if ($skipPotUpdate)  { $pwshArgs += "-SkipPotUpdate" }
+if ($potPort)        { $pwshArgs += @("-PotPort", $potPort) }
 
 # Started as a CHILD pwsh process rather than dot-sourced or invoked with
 # & in this one, even though this script is already running under pwsh and

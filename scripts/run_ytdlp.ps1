@@ -79,7 +79,35 @@ param(
     # number this script can pick for you. Start low (2-4) against a
     # channel you don't mind re-running if something goes wrong, watch
     # download.log for warnings/403s, and only raise it if that stays clean.
-    [Parameter(Mandatory = $false)][ValidateRange(1, 64)][int]$Workers = 1
+    [Parameter(Mandatory = $false)][ValidateRange(1, 64)][int]$Workers = 1,
+
+    # --- PO (proof-of-origin) token options ---
+    # See scripts/pot-provider.ps1 for what a PO token is and why this
+    # pipeline needs one. Short version: without a token, the only YouTube
+    # client this pipeline can actually download from is android_vr, which
+    # is the one with the open upstream 403 bug (yt-dlp/yt-dlp#17456). With
+    # a token, tv_simply and web_safari become usable and android_vr
+    # becomes a genuine last-resort fallback instead of the only option.
+
+    # Port the local provider server listens on. 4416 is upstream's
+    # default and what the yt-dlp plugin assumes when nothing overrides it;
+    # change it only if something else on this machine already holds 4416.
+    [Parameter(Mandatory = $false)][ValidateRange(1024, 65535)][int]$PotPort = 4416,
+
+    # Skips the update-and-verify cycle when the provider is unhealthy.
+    # The provider is still USED if it already works -- this only
+    # suppresses the "try to fix it" half. Useful on a metered or offline
+    # connection, and for reproducing a specific failure without the
+    # pipeline repairing it out from under you mid-investigation.
+    [Parameter(Mandatory = $false)][switch]$SkipPotUpdate,
+
+    # Skips PO tokens entirely and runs on yt-dlp's own default clients --
+    # exactly the behavior this pipeline had before pot-provider.ps1
+    # existed. NOTE that this still triggers degraded-mode archive handling
+    # below (downloads withheld from archive.txt), because what that
+    # handling protects against is "this run may not be full quality",
+    # which is equally true whether the provider is broken or skipped.
+    [Parameter(Mandatory = $false)][switch]$NoPot
 )
 
 # On PowerShell 7.3+, native-command stderr lines get wrapped as ErrorRecord
@@ -478,6 +506,109 @@ if ($LazyPlaylist -and ($Workers -gt 1)) {
     "  NOTE: -LazyPlaylist has no effect combined with -Workers > 1 -- parallel dispatch already requires a full up-front listing (to build the worker queue), so there's no 'lazy' phase for it to skip." | Tee-Object -FilePath $logFile -Append
 }
 
+# =====================================================================
+# PO TOKEN PREFLIGHT
+# =====================================================================
+# Runs BEFORE any download so the client list and the archive policy for
+# this entire session are decided once, up front, rather than per video.
+#
+# Two things come out of this block:
+#   $potArgs      -- the --extractor-args to splat onto every yt-dlp call
+#                    below (empty when degraded, which reproduces exactly
+#                    the client behaviour this pipeline had before PO
+#                    tokens existed).
+#   $potDegraded  -- whether this session must withhold its downloads from
+#                    the download archive. See the long note further down
+#                    at "DEGRADED-MODE ARCHIVE HANDLING" for why that
+#                    matters more than it sounds like it should.
+#
+# Failure here is never fatal. A machine with no node, no network, or a
+# provider upstream has not fixed yet still downloads videos; it just
+# downloads them the way it did last month.
+$potArgs     = @()
+$potDegraded = $true
+$potReason   = "not attempted"
+$potModule   = Join-Path $scriptsRoot "pot-provider.ps1"
+
+if ($NoPot) {
+    $potReason = "-NoPot was passed"
+    "PO tokens: disabled by -NoPot. Running on yt-dlp's default clients." | Tee-Object -FilePath $logFile -Append
+} elseif (-not (Test-Path $potModule)) {
+    # An older install that predates pot-provider.ps1, or a partial file
+    # placement. Worth saying out loud, because the symptom otherwise is
+    # just "downloads are flakier than the docs imply".
+    $potReason = "pot-provider.ps1 not found at $potModule"
+    "PO tokens: pot-provider.ps1 is missing from $scriptsRoot -- re-run setup to install it. Running on yt-dlp's default clients meanwhile." | Tee-Object -FilePath $logFile -Append
+} else {
+    try {
+        . $potModule
+        # The logger is threaded in as a scriptblock rather than having the
+        # module know about $logFile: the module has to stay usable
+        # standalone (pot-provider.ps1 -SelfTest), where there is no
+        # session log to write to.
+        $potResult = Initialize-PotProvider -ProviderPort $PotPort -SkipUpdate:$SkipPotUpdate -Log {
+            param($m) $m | Tee-Object -FilePath $logFile -Append | Out-Null; Write-Host "  [pot] $m"
+        }
+        # Wrapped in @() for the same reason $jsRuntimeArgs is, and this
+        # one is not hypothetical: reading an empty array off a
+        # pscustomobject property hands back $null, and a one-element
+        # result would arrive as a bare scalar. Splatting $null happens to
+        # behave like splatting @(), so the degraded case would work by
+        # luck -- but the healthy case builds a 2- or 4-element array whose
+        # count depends on whether -PotPort was overridden, and relying on
+        # luck for one shape and not the other is how the launcher's $rest
+        # bug happened.
+        $potArgs     = @($potResult.ExtractorArgs)
+        $potDegraded = -not $potResult.Healthy
+        $potReason   = $potResult.Reason
+        "PO tokens: $(if ($potResult.Healthy) { 'active' } else { 'UNAVAILABLE' }) | clients: $($potResult.PlayerClients) | $($potResult.Reason)" |
+            Tee-Object -FilePath $logFile -Append
+    } catch {
+        # A broken provider module must not take the download with it.
+        $potReason = "pot-provider.ps1 threw: $($_.Exception.Message)"
+        "PO tokens: provider setup failed ($($_.Exception.Message)). Running on yt-dlp's default clients." | Tee-Object -FilePath $logFile -Append
+    }
+}
+
+# --- DEGRADED-MODE ARCHIVE HANDLING ---
+# This is the subtle part, and it is worth spelling out because getting it
+# wrong is silent and permanent.
+#
+# --download-archive is append-only and yt-dlp writes to it as each video
+# completes. In a degraded session the videos that complete are real
+# downloads, but they came from yt-dlp's fallback clients, which may mean
+# a lower maximum quality, missing formats, or a "made for kids" video
+# skipped outright. If those ids land in archive.txt, every future run --
+# including runs where the provider is perfectly healthy -- will skip them
+# as already archived. The archive would quietly and permanently contain
+# the worse copy, with nothing in it to say which entries were degraded.
+#
+# The fix is to let yt-dlp READ the real archive (so already-done videos
+# are still correctly skipped, and a degraded run does not re-download the
+# entire back catalogue) while WRITING to a throwaway copy. Diffing the
+# copy against the original afterwards yields exactly the set of ids this
+# session downloaded, which goes to needs-refetch.txt instead of to the
+# archive. yt-dlp has no read-only archive mode, so a scratch copy is the
+# mechanism; the semantics are what matter.
+#
+# Cost: a degraded video downloads again later, so it is paid for twice in
+# bandwidth. That is the deliberate trade -- duplicate work is recoverable,
+# a silently-degraded archive entry is not.
+$refetchFile   = Join-Path $logsDir "needs-refetch.txt"
+$archiveForRun = $archiveFile
+$archiveScratch = $null
+if ($potDegraded) {
+    $archiveScratch = Join-Path $logsDir ".archive-degraded-$timestamp.txt"
+    if (Test-Path $archiveFile) {
+        Copy-Item -Path $archiveFile -Destination $archiveScratch -Force
+    } else {
+        New-Item -ItemType File -Path $archiveScratch -Force | Out-Null
+    }
+    $archiveForRun = $archiveScratch
+    "  Degraded session: downloads will NOT be recorded in archive.txt. Any video completed now is listed in $refetchFile for re-fetching at full quality later." |
+        Tee-Object -FilePath $logFile -Append
+}
+
 # --ignore-config (used in every yt-dlp invocation below, single-stream or
 # parallel) stops yt-dlp from also auto-loading any yt-dlp.conf it finds in
 # the current directory, the per-user config dir (~/.config/yt-dlp/ on
@@ -552,13 +683,18 @@ if ($Workers -le 1) {
     # Quoting the URL is the only cure for those, so ytdl.ps1 detects what
     # it can of the aftermath and says so plainly, and docs/ytdl-usage.md
     # spells out the rule.
+    # $archiveForRun is the real archive.txt in a healthy session and a
+    # throwaway copy in a degraded one -- see DEGRADED-MODE ARCHIVE
+    # HANDLING above. @potArgs is empty in a degraded session, which makes
+    # this invocation identical to the pre-PO-token one.
     & yt-dlp `
         --ignore-config `
         --config-location $confFile `
-        --download-archive $archiveFile `
+        --download-archive $archiveForRun `
         --paths "home:$completeArchiveDir" `
         --paths "temp:$incompleteDir" `
         @jsRuntimeArgs `
+        @potArgs `
         --exec $execCmd `
         @playlistArgs `
         -- `
@@ -713,7 +849,14 @@ if ($Workers -le 1) {
 
             $id            = $_
             $confFile      = $using:confFile
-            $archiveFile   = $using:archiveFile
+            # The PO token decision was made ONCE in the parent, before
+            # any worker started, and only its RESULT crosses the runspace
+            # boundary. Workers must never run the preflight themselves:
+            # they would race to start, health-check and possibly rebuild
+            # the same single provider server on the same single port.
+            # The server is shared infrastructure; the args are just data.
+            $archiveForRun = $using:archiveForRun
+            $potArgs       = $using:potArgs
             $completeArchiveDir = $using:completeArchiveDir
             $incompleteDir = $using:incompleteDir
             $scriptsRoot   = $using:scriptsRoot
@@ -739,10 +882,11 @@ if ($Workers -le 1) {
             & yt-dlp `
                 --ignore-config `
                 --config-location $confFile `
-                --download-archive $archiveFile `
+                --download-archive $archiveForRun `
                 --paths "home:$completeArchiveDir" `
                 --paths "temp:$incompleteDir" `
                 @jsRuntimeArgs `
+                @potArgs `
                 --exec $workerExecCmd `
                 -- `
                 $videoUrl 2>&1 | Tee-Object -Variable workerOutput | Add-Content -Path $workerLogFile
@@ -767,6 +911,58 @@ if ($Workers -le 1) {
         $sessionWarnings = ($results | Measure-Object -Property Warnings -Sum).Sum
         "-- Session summary: $videosTouched video(s) touched, $archiveSkipped already archived (skipped), $sessionErrors error(s), $sessionWarnings warning(s) --" | Tee-Object -FilePath $logFile -Append
     }
+}
+
+# --- Degraded-session reconciliation: capture what must be re-fetched ---
+# Runs for BOTH the single-stream and worker paths (they share one scratch
+# archive, exactly as they already share one real archive.txt).
+#
+# The diff is done by video id against the ORIGINAL archive rather than by
+# counting lines, because a degraded session can interleave with anything
+# else that touched archive.txt between the copy and now -- and because an
+# id is the only part of an archive line this pipeline ever needs to act
+# on later.
+#
+# Note what is deliberately NOT done here: the downloaded files are left
+# exactly where they are. A degraded copy of a video is still a copy of
+# that video, and deleting it to force a clean re-fetch would mean an
+# outage produces nothing at all, which is the outcome this whole design
+# exists to avoid. needs-refetch.txt records the debt; paying it is a
+# separate, explicit act (see docs/setup-guide.md).
+if ($potDegraded -and $archiveScratch -and (Test-Path $archiveScratch)) {
+    try {
+        $before = @{}
+        if (Test-Path $archiveFile) {
+            foreach ($line in (Get-Content -Path $archiveFile -ErrorAction SilentlyContinue)) {
+                if ($line -and $line.Trim()) { $before[$line.Trim()] = $true }
+            }
+        }
+        $newEntries = @(
+            Get-Content -Path $archiveScratch -ErrorAction SilentlyContinue |
+                Where-Object { $_ -and $_.Trim() -and -not $before.ContainsKey($_.Trim()) } |
+                ForEach-Object { $_.Trim() }
+        )
+        if ($newEntries.Count -gt 0) {
+            # One line per entry, prefixed with when and why, so the file
+            # stays useful months later when "why is this video in here"
+            # is not obvious. Appended, never overwritten: successive
+            # degraded sessions accumulate rather than clobber.
+            $stamp = Get-Date -Format "o"
+            $newEntries |
+                ForEach-Object { "$stamp`t$_`tdegraded: $potReason" } |
+                Add-Content -Path $refetchFile -Encoding UTF8
+            "-- $($newEntries.Count) video(s) downloaded WITHOUT PO tokens and withheld from archive.txt. Listed in $refetchFile; re-run those URLs once 'pwsh -File $potModule -Status' reports a healthy provider, to replace them at full quality. --" |
+                Tee-Object -FilePath $logFile -Append
+        }
+    } catch {
+        # If reconciliation fails, the scratch archive is still on disk and
+        # is named for the session timestamp, so nothing is lost -- say
+        # where it is rather than silently dropping the record.
+        "WARNING: could not reconcile the degraded-session archive ($($_.Exception.Message)). The raw scratch archive is kept at $archiveScratch -- diff it against archive.txt by hand to find what needs re-fetching." |
+            Tee-Object -FilePath $logFile -Append
+        $archiveScratch = $null
+    }
+    if ($archiveScratch) { Remove-Item -Path $archiveScratch -Force -ErrorAction SilentlyContinue }
 }
 
 # --- Retire the staging folder itself if the session left it empty (#5) ---

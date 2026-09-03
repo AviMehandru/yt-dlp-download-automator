@@ -265,6 +265,42 @@ ytdl "https://youtube.com/@somechannel/videos" --sync --path /mnt/external/archi
 
 ---
 
+### `--no-pot`, `--skip-pot-update`, `--pot-port N`
+
+PO (proof-of-origin) token controls. Full background is in
+`docs/setup-guide.md` under **PO tokens and degraded mode**; the short
+version is that a working token provider is what lets this pipeline use
+`tv_simply` and `web_safari` instead of relying entirely on `android_vr`.
+
+| Flag | Effect |
+|---|---|
+| `--no-pot` | Skip tokens entirely; run on yt-dlp's default clients. |
+| `--skip-pot-update` | Use the provider if it already works, but don't try to update or repair it when it doesn't. |
+| `--pot-port N` | Move the local provider server off its default port 4416. |
+
+`--no-pot` and any run where the provider is unhealthy are both treated as
+**degraded**: the videos still download, but they are withheld from
+`archive.txt` and listed in `Archive Logs/Logs/needs-refetch.txt` so a
+later healthy run can replace them at full quality. That is deliberate —
+a degraded entry recorded in the archive would be skipped forever.
+
+```bash
+# Provider is broken upstream and you want to keep archiving meanwhile
+ytdl "https://youtu.be/VIDEOID" --no-pot
+
+# Offline or metered: use what's installed, don't go fetch updates
+ytdl "https://youtu.be/VIDEOID" --skip-pot-update
+
+# 4416 is already taken on this machine
+ytdl "https://youtu.be/VIDEOID" --pot-port 8080
+```
+
+Check provider health at any time:
+
+```bash
+pwsh -File "<install root>/scripts/pot-provider.ps1" -Status
+```
+
 ## Combining flags
 
 Any combination is valid — they're independent and only interact through

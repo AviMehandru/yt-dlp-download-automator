@@ -4,7 +4,7 @@
 # THIS SCRIPT IS HALF THE INSTALLER. It performs Steps 1-6 -- everything
 # that has to talk to a specific operating system's package manager, plus
 # installing pwsh itself -- and then hands over to scripts/setup-common.ps1
-# for Steps 7-12, which it shares byte-for-byte with the Windows
+# for Steps 7-14, which it shares byte-for-byte with the Windows
 # bootstrap, setup.ps1.
 #
 # WHY THE SPLIT LANDS THERE. It is not that these steps are the hard ones;
@@ -14,7 +14,7 @@
 # Step 6 (desktop previews) is webp-pixbuf-loader and ffmpegthumbnailer
 # here, a Homebrew cask on macOS, and VLC via winget on Windows -- three
 # implementations of one sentence with no shared body to factor out.
-# Steps 7-12 are the opposite: fetching the project files, creating the
+# Steps 7-14 are the opposite: fetching the project files, creating the
 # folder tree, copying files into place, writing the launchers, wiring
 # PATH and verifying are the same work on every platform, and used to be
 # roughly 600 lines maintained twice. Now they exist once.
@@ -30,7 +30,7 @@
 # file as 7-9. Nothing depended on the old relative order -- the moved
 # steps need only the base packages from Step 2 -- and the reorder is what
 # makes the native/shared boundary a single clean cut. The step COUNT is
-# still 12, so a log from any platform still reads "Step N/12" and stays
+# still 14, so a log from any platform still reads "Step N/14" and stays
 # directly comparable.
 #
 # Deliberately does NOT use "set -e". Every external command that could
@@ -39,7 +39,7 @@
 # wrapped so a failure prints a clear WARNING and the script keeps going,
 # rather than dying silently partway through.
 #
-# The one thing that IS fatal is pwsh: Steps 7-12 run under it, so if
+# The one thing that IS fatal is pwsh: Steps 7-14 run under it, so if
 # Step 4 could not install it this script stops with an explanation rather
 # than pretending. That is a change from the previous behavior, which went
 # on to place files that could not be used -- run_ytdlp.ps1 and
@@ -182,21 +182,22 @@ echo "Detected platform: ${PLATFORM}"
 
 # --- Overall progress bar ---
 # This is a step-counter bar, not a byte/percent-of-work bar: it advances
-# once per top-level step (12 total, matching the "Step N/12" labels this
+# once per top-level step (14 total, matching the "Step N/14" labels this
 # script prints), regardless of how long that step's actual work takes.
 # That's a deliberate simplification -- the individual installers/downloads
 # below (apt/brew, curl, yt-dlp -U, deno's installer) already print their
 # own real progress bars for their own work, so this one only needs to
 # answer "how far through the whole script am I", not duplicate byte-level
 # progress that's already visible.
-# TOTAL_STEPS must match the number of log() calls below (currently 12) --
+# TOTAL_STEPS must match the number of log() calls below plus the shared
+# file's (currently 6 here + 8 there = 14) --
 # if a step is ever added or removed, update this constant in the same
 # commit, or the bar will finish early/late relative to the actual work.
 # Note the step COUNT is the same on both platforms even though two of the
 # steps (VMware, desktop previews) do different or no work on macOS -- they
 # still run and still report, so the numbering matches between a Linux log
 # and a macOS log.
-TOTAL_STEPS=12
+TOTAL_STEPS=14
 CURRENT_STEP=0
 
 draw_progress_bar() {
@@ -216,10 +217,10 @@ draw_progress_bar() {
 
 # log() does double duty: it's the per-step header, but it also owns the
 # step counter -- every call advances the overall bar by exactly one step.
-# This keeps the bar's step count and the actual "Step N/12" numbering
+# This keeps the bar's step count and the actual "Step N/14" numbering
 # impossible to drift apart from each other, since there's only one place
 # (this function) that increments anything, instead of hand-typing
-# "Step 3/12" etc. at each call site where it could get out of sync if
+# "Step 3/14" etc. at each call site where it could get out of sync if
 # steps are ever reordered/added later.
 log()  {
     CURRENT_STEP=$((CURRENT_STEP + 1))
@@ -686,7 +687,7 @@ else
     echo "Note: the file manager caches thumbnails, so folders you already browsed before this step may keep showing generic icons. Log out and back in (or run 'rm -rf ~/.cache/thumbnails' and reopen the file manager) to force them to regenerate."
 fi
 
-# --- Hand off to the shared installer for Steps 7-12 ---
+# --- Hand off to the shared installer for Steps 7-14 ---
 # Everything from here -- curl_cffi, Deno, fetching the project files, the
 # folder tree, placing files, the launchers, PATH wiring and verification
 # -- is identical on Linux, macOS and Windows, and lives in
@@ -704,7 +705,7 @@ fi
 # edit-then-reinstall loop working.
 if ! command -v pwsh >/dev/null 2>&1; then
     echo ""
-    echo "ERROR: pwsh (PowerShell 7) is not available, so Steps 7-12 cannot run."
+    echo "ERROR: pwsh (PowerShell 7) is not available, so Steps 7-14 cannot run."
     echo ""
     echo "Those steps place the pipeline files and create the folder tree, but"
     echo "every one of those files is a PowerShell script -- an install without"

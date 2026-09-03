@@ -1,12 +1,12 @@
 <#
 .SYNOPSIS
-    Steps 7-12 of the installer, shared by every platform.
+    Steps 7-14 of the installer, shared by every platform.
 
 .DESCRIPTION
     setup.sh (Linux and macOS) and setup.ps1 (Windows) are BOOTSTRAPS. They
     do Steps 1-6 -- everything that has to talk to a specific operating
     system's package manager, plus installing pwsh itself -- and then hand
-    over to this file for the rest. Steps 7-12 are the ones where the three
+    over to this file for the rest. Steps 7-14 are the ones where the three
     platforms were doing substantially the same work in two languages:
     fetching the project files, creating the folder tree, copying files
     into place, writing the launchers, wiring PATH, and verifying. That is
@@ -21,7 +21,7 @@
     macOS, and VLC via winget on Windows -- three implementations of one
     sentence, with no shared body to factor out. Merging those would mean
     writing a package-manager abstraction in PowerShell that duplicates
-    the one setup.sh already needs for its own Steps 1-2. Steps 7-12, by
+    the one setup.sh already needs for its own Steps 1-2. Steps 7-14, by
     contrast, are the same work everywhere, with small $IsWindows branches.
 
     NOTE ON STEP ORDER. Steps 5 and 6 here (VMware, desktop previews) were
@@ -29,8 +29,13 @@
     fetch) moved down to 7-9. Nothing depends on the old relative order --
     the moved steps need only the base packages from Step 2 -- and the
     reorder is what makes the native/shared boundary a single clean cut
-    rather than two separate handoffs. The step COUNT is still 12, so a log
-    from any platform still reads "Step N/12" and stays comparable.
+    rather than two separate handoffs.
+
+    The step COUNT went from 12 to 14 when PO token support landed: Node.js
+    (Step 9) and the provider build (Step 13). Those two are why the shared
+    half now runs 7-14 rather than 7-12. The count is still identical across
+    platforms, so a log from any of them still reads "Step N/14" and stays
+    directly comparable.
 
     REQUIRES pwsh 7, which Step 4 of the bootstrap installs. That is a real
     behavior change worth stating plainly: previously, if the pwsh install
@@ -91,7 +96,7 @@ param(
     [Parameter(Mandatory = $true)] [string]   $SourceDir,
     [string]   $PlatformLabel     = "unknown",
     [int]      $StartStep         = 6,
-    [int]      $TotalSteps        = 12,
+    [int]      $TotalSteps        = 14,
     [string]   $InheritedWarningsFile = "",
     [switch]   $HasDesktop
 )
@@ -127,7 +132,7 @@ function Draw-ProgressBar {
 }
 
 # Write-Step does double duty: per-step header AND step counter, so the
-# bar's count and the "Step N/12" numbering cannot drift apart -- there is
+# bar's count and the "Step N/14" numbering cannot drift apart -- there is
 # only one place that increments anything.
 function Write-Step {
     param([string]$Message)
@@ -279,8 +284,103 @@ if (Test-Path $DenoBin) {
 # logs a clear warning if none of them hit. An install somewhere else
 # still works -- it just is not the tidiest outcome.
 
-# --- Step 9: fetch the project files ---
-# Convenience step: pulls the project files down automatically so Step 11
+# --- Step 9: Node.js (runtime for the PO token provider server) ---
+# WHY NODE, when this project already installs Deno. They are not
+# interchangeable here. Deno runs YouTube's cipher/nsig challenge inside
+# yt-dlp, which is a self-contained script yt-dlp hands to whatever JS
+# runtime it is given. The PO token provider is a different thing
+# entirely: it is an upstream Node APPLICATION
+# (bgutil-ytdlp-pot-provider) with its own npm dependency tree and a
+# TypeScript build step. Running it under Deno would mean maintaining a
+# fork of somebody else's server -- exactly the kind of ongoing cost this
+# project should not take on just to save one dependency.
+#
+# Installed the way yt-dlp and Deno already are: an official tarball
+# unpacked into a user-owned directory, not a package manager. That is
+# what keeps this step in the SHARED file -- package managers are the
+# bootstraps' job, in Steps 1-6 -- and keeps it root-free.
+#
+# An existing node on PATH is used as-is when it is new enough. Node is
+# common enough on developer machines that installing a second copy by
+# default would be rude, and the provider needs no specific build.
+Write-Step "Installing Node.js (runtime for the PO token provider)"
+$NodeMinMajor = 18
+$nodeOk = $false
+$existingNode = Get-Command node -ErrorAction SilentlyContinue
+if ($existingNode) {
+    $nodeVer = (& node --version 2>$null | Select-Object -First 1)
+    if ($nodeVer -and $nodeVer -match 'v(\d+)\.' -and [int]$Matches[1] -ge $NodeMinMajor) {
+        Write-Host "node $nodeVer already present at $($existingNode.Source) -- skipping."
+        $nodeOk = $true
+    } else {
+        Write-Host "node $nodeVer is older than v$NodeMinMajor -- installing a current copy alongside it."
+    }
+}
+if (-not $nodeOk) {
+    try {
+        # Resolved from Node's own dist index rather than hardcoded, which
+        # would rot. LTS entries carry a codename STRING in "lts";
+        # non-LTS entries carry the boolean false -- hence the type test
+        # rather than a plain truthiness check, which would also match
+        # nothing useful.
+        $dist = Invoke-RestMethod -Uri "https://nodejs.org/dist/index.json" -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+        $lts  = $dist | Where-Object { $_.lts -is [string] } | Select-Object -First 1
+        if (-not $lts) { throw "no LTS release found in the dist index" }
+
+        # The arch token is Node's own spelling, not .NET's, so it is
+        # mapped rather than used directly.
+        $arch = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
+            "Arm64" { "arm64" }
+            "X64"   { "x64" }
+            default { "x64" }
+        }
+        if ($IsWindows)   { $plat = "win-$arch";    $ext = "zip" }
+        elseif ($IsMacOS) { $plat = "darwin-$arch"; $ext = "tar.gz" }
+        else              { $plat = "linux-$arch";  $ext = "tar.xz" }
+
+        $nodeName    = "node-$($lts.version)-$plat"
+        $nodeUrl     = "https://nodejs.org/dist/$($lts.version)/$nodeName.$ext"
+        $nodeArchive = Join-Path ([System.IO.Path]::GetTempPath()) "$nodeName.$ext"
+        $nodeDest    = Join-Path $DataRoot "node"
+
+        Write-Host "Downloading $nodeUrl ..."
+        Invoke-WebRequest -Uri $nodeUrl -OutFile $nodeArchive -UseBasicParsing -TimeoutSec 300 -ErrorAction Stop
+
+        if (Test-Path $nodeDest) { Remove-Item -Path $nodeDest -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $nodeDest -Force | Out-Null
+        if ($ext -eq "zip") {
+            Expand-Archive -Path $nodeArchive -DestinationPath $nodeDest -Force
+        } else {
+            # tar handles both .gz and .xz and ships by default on all
+            # three targets (Windows has included bsdtar since 1803).
+            & tar -xf $nodeArchive -C $nodeDest
+        }
+        Remove-Item -Path $nodeArchive -Force -ErrorAction SilentlyContinue
+
+        # The archive unpacks to a single versioned directory. Its bin/ is
+        # what has to reach PATH -- except on Windows, where the
+        # executables sit at the top of that directory with no bin/ level.
+        $nodeHome = Get-ChildItem -Path $nodeDest -Directory | Select-Object -First 1
+        if (-not $nodeHome) { throw "the Node archive unpacked to nothing recognizable" }
+        $nodeBin = if ($IsWindows) { $nodeHome.FullName } else { Join-Path $nodeHome.FullName "bin" }
+
+        # Prepended to THIS PROCESS's PATH so Step 13 can build the
+        # provider without waiting for a new shell. Durable PATH wiring
+        # happens with everything else further down.
+        $env:PATH = "$nodeBin$([System.IO.Path]::PathSeparator)$env:PATH"
+        if (Get-Command node -ErrorAction SilentlyContinue) {
+            Write-Host "Installed node $(& node --version 2>$null) to $nodeBin."
+            $nodeOk = $true
+        } else {
+            Write-Warn "Node unpacked to $nodeBin but 'node' is still not runnable from there."
+        }
+    } catch {
+        Write-Warn "Could not install Node.js ($($_.Exception.Message)). The PO token provider cannot run without it, so downloads fall back to yt-dlp's default clients -- still functional, but see docs/setup-guide.md for what that costs."
+    }
+}
+
+# --- Step 10: fetch the project files ---
+# Convenience step: pulls the project files down automatically so Step 12
 # can find them without you having to place them by hand.
 #
 # WHY THIS FETCHES INDIVIDUAL FILES INSTEAD OF CLONING: the honest answer
@@ -304,6 +404,7 @@ $ProjectFiles = @(
     "scripts/run_ytdlp.ps1",
     "scripts/postprocess.ps1",
     "scripts/ytdl.ps1",
+    "scripts/pot-provider.ps1",
     "scripts/archive-viewer.py",
     "config/yt-dlp.conf",
     $LauncherSrc
@@ -365,7 +466,7 @@ foreach ($repoPath in $ProjectFiles) {
     }
 }
 
-# --- Step 10: folder structure ---
+# --- Step 11: folder structure ---
 Write-Step "Creating folder structure under $DataRoot"
 foreach ($folder in @(
     $ScriptsDir,
@@ -380,7 +481,7 @@ foreach ($folder in @(
 }
 Write-Host "Folder structure created."
 
-# --- Step 11: place the pipeline files and the archive viewer ---
+# --- Step 12: place the pipeline files and the archive viewer ---
 Write-Step "Installing pipeline files"
 function Install-ProjectFile {
     param([string]$RepoPath, [string]$Destination, [string]$Label)
@@ -409,6 +510,10 @@ Install-ProjectFile -RepoPath "scripts/postprocess.ps1"   -Destination (Join-Pat
 # than in $LocalBin because it is a program, not a command -- ytdl-view
 # below is what you type.
 Install-ProjectFile -RepoPath "scripts/ytdl.ps1"          -Destination (Join-Path $ScriptsDir "ytdl.ps1")          -Label "ytdl.ps1"
+# pot-provider.ps1 is dot-sourced by run_ytdlp.ps1 rather than launched, so
+# it needs no PATH entry and no launcher -- but it must land in the same
+# ScriptsDir, because that is the only place run_ytdlp.ps1 looks for it.
+Install-ProjectFile -RepoPath "scripts/pot-provider.ps1"  -Destination (Join-Path $ScriptsDir "pot-provider.ps1")  -Label "pot-provider.ps1"
 Install-ProjectFile -RepoPath "scripts/archive-viewer.py" -Destination (Join-Path $ScriptsDir "archive-viewer.py") -Label "archive-viewer.py"
 Install-ProjectFile -RepoPath "config/yt-dlp.conf"        -Destination (Join-Path $ConfigsDir "yt-dlp.conf")       -Label "yt-dlp.conf"
 Install-ProjectFile -RepoPath $LauncherSrc                -Destination $LauncherDst                                -Label "ytdl"
@@ -532,7 +637,41 @@ if (Test-Path $DownloadDir) {
     }
 }
 
-# --- Step 12: verify ---
+# --- Step 13: build and verify the PO token provider ---
+# Runs AFTER Step 12 rather than beside the Node install in Step 9,
+# because the thing that does this work is pot-provider.ps1, and that file
+# does not exist on this machine until Step 12 places it.
+#
+# Delegating to pot-provider.ps1 rather than repeating its logic here is
+# deliberate: the install path and the runtime self-repair path have to
+# stay identical, or the first `ytdl` run after a setup will "fix" a
+# perfectly good install into something different. One implementation,
+# called from both places.
+#
+# A failure here is a WARNING, never fatal. Everything below this line
+# still produces a working archiver -- it just runs on yt-dlp's default
+# clients until the provider is sorted out.
+Write-Step "Building the PO token provider"
+$potScript = Join-Path $ScriptsDir "pot-provider.ps1"
+if (-not $nodeOk) {
+    Write-Warn "Skipping the PO token provider: no usable Node.js runtime (see Step 9). Downloads will use yt-dlp's default clients."
+} elseif (-not (Test-Path $potScript)) {
+    Write-Warn "Skipping the PO token provider: pot-provider.ps1 was not installed in Step 12."
+} else {
+    try {
+        . $potScript
+        $potInit = Initialize-PotProvider -Log { param($m) Write-Host "  [pot] $m" }
+        if ($potInit.Healthy) {
+            Write-Host "PO token provider ready (v$($potInit.Version)). Clients: $($potInit.PlayerClients)"
+        } else {
+            Write-Warn "The PO token provider could not be brought up: $($potInit.Reason). Downloads will run on yt-dlp's default clients, and anything downloaded that way is withheld from archive.txt and listed in Archive Logs/Logs/needs-refetch.txt so it can be re-fetched later. Re-check any time with: pwsh -File `"$potScript`" -Status"
+        }
+    } catch {
+        Write-Warn "The PO token provider setup threw an error ($($_.Exception.Message)). Downloads will run on yt-dlp's default clients."
+    }
+}
+
+# --- Step 14: verify ---
 # yt-dlp and deno are installed into $LocalBin rather than by a package
 # manager, so both are checked via their full paths rather than as bare
 # commands. A bare lookup produces a false NOT FOUND on a fresh install:
