@@ -44,14 +44,18 @@ project's history and it's consistently guarded against now.
 
 ## Findings
 
-### 1. `curl | sh` for Deno, with no integrity verification (setup.sh, Step 6)
+### 1. Deno's install script is run with no integrity verification (scripts/setup-common.ps1, Step 8)
 
-```bash
-curl -fsSL https://deno.land/install.sh | sh -s -- -y
+```powershell
+& curl -fsSL --retry 3 --retry-delay 2 "https://deno.land/install.sh" -o $denoScript
+& sh $denoScript -y
 ```
 
-This pipes a remote script straight into a shell with no checksum or
-signature check. If `deno.land` were ever compromised, or a
+This fetches a remote script and runs it with no checksum or signature
+check. It is no longer a literal `curl | sh` pipeline — that was split into
+two steps so a failed download is distinguishable from a failed install —
+but that was a diagnosability fix, **not** a security one: the script is
+still executed unverified, so this finding stands unchanged. If `deno.land` were ever compromised, or a
 man-in-the-middle occurred despite HTTPS (e.g. a compromised CA, a
 malicious proxy on the network), this executes arbitrary code as your
 user — and the binary that results then gets `sudo cp`'d to
@@ -77,12 +81,18 @@ sha256sum -c /tmp/deno.zip.sha256
 ### 2. `yt-dlp` binary downloaded with no hash verification (setup.sh, Step 3)
 
 ```bash
-sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
-sudo chmod a+rx /usr/local/bin/yt-dlp
+curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o "$HOME/.local/bin/yt-dlp"
+chmod a+rx "$HOME/.local/bin/yt-dlp"
 ```
 
 yt-dlp publishes a `SHA2-256SUMS` file (and GPG signatures) alongside every
 release. This installs the binary directly without checking either.
+
+(This snippet previously showed a `sudo` install into `/usr/local/bin`. The
+installer has not done that for some time — it installs into a directory the
+user already owns, so that yt-dlp's `-U` self-update can rename over its own
+binary. That change removed the need for elevation here; it did **not** add
+any integrity verification, so the finding itself is unaffected.)
 
 **Severity**: Same reasoning as above — low in practice given GitHub's own
 TLS/integrity guarantees, but this is the single most-trusted binary in
@@ -93,15 +103,16 @@ you do only one of these fixes.
 **Fix, if you want it**:
 ```bash
 curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS -o /tmp/yt-dlp-sums.txt
-sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o "$HOME/.local/bin/yt-dlp"
 grep " yt-dlp$" /tmp/yt-dlp-sums.txt | sha256sum -c -
-sudo chmod a+rx /usr/local/bin/yt-dlp
+chmod a+rx "$HOME/.local/bin/yt-dlp"
 ```
 
-### 3. Predictable filenames in `/tmp` (setup.sh, Steps 4/6/7)
+### 3. Predictable filenames in `/tmp` (setup.sh Steps 4/5, scripts/setup-common.ps1 Step 8)
 
-`/tmp/packages-microsoft-prod.deb`, `/tmp/deno-install.log`,
-`/tmp/vmhgfs-mount.log` are all fixed, predictable names. On a genuinely
+`/tmp/deno-install.log`, `/tmp/deno-install.sh` and `/tmp/vmhgfs-mount.log`
+are fixed, predictable names. (The warnings file the bootstrap hands to the
+shared installer already uses `mktemp`, so that one is not affected.) On a genuinely
 single-user VM (your actual setup) this is a non-issue. On a shared
 multi-user machine, a fixed `/tmp` filename is a classic (if narrow) race
 condition/symlink-attack vector — another local user could pre-create a
@@ -114,7 +125,7 @@ multi-tenant.
 **Fix, if you want it**: swap fixed paths for `mktemp`, e.g.
 `DENO_LOG="$(mktemp)"`.
 
-### 4. `allow_other` on the VMware shared-folder mount (setup.sh, Step 7)
+### 4. `allow_other` on the VMware shared-folder mount (setup.sh, Step 5)
 
 ```bash
 sudo vmhgfs-fuse .host:/ /mnt/hgfs -o subtype=vmhgfs-fuse,allow_other

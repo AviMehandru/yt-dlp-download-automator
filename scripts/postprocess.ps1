@@ -21,6 +21,35 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# =====================================================================
+# PLATFORM RESOLUTION
+# =====================================================================
+# Must match run_ytdlp.ps1's own platform block exactly -- this is the
+# same install root, resolved the same way, and the two scripts disagreeing
+# about where configs/ lives would silently produce a blank config version
+# in every manifest. See run_ytdlp.ps1 for why Windows keeps C:/yt-dlp
+# (MAX_PATH) rather than moving under $HOME like the Unix platforms.
+#
+# NOTE: only the INSTALL root is resolved here. The DATA root -- which may
+# have been overridden with run_ytdlp.ps1's -DataRoot -- is derived from
+# $FilePath's own ancestry further down instead, so it always reflects
+# whichever data root this particular video actually landed in without
+# needing that value passed in separately.
+if ($IsWindows) {
+    $defaultInstallRoot = "C:/yt-dlp"
+} else {
+    # Linux and macOS are identical here: $HOME/yt-dlp.
+    $defaultInstallRoot = Join-Path $HOME "yt-dlp"
+}
+$installRoot = if ([string]::IsNullOrWhiteSpace($env:YTDLP_INSTALL_ROOT)) {
+    $defaultInstallRoot
+} else {
+    $env:YTDLP_INSTALL_ROOT
+}
+# =====================================================================
+# END PLATFORM RESOLUTION
+# =====================================================================
+
 # --- Cross-platform advisory file locking ---
 # Needed once postprocess.ps1 can run for several videos AT THE SAME TIME
 # (under run_ytdlp.ps1 -Workers N): several instances of this script can
@@ -33,17 +62,17 @@ $ErrorActionPreference = "Stop"
 # This isn't hypothetical: it's the exact shape of bug that would corrupt
 # a manifest without ever throwing an error or appearing in any log.
 #
-# Deliberately NOT using the Linux `flock` binary: that would work here,
-# but this pipeline's Windows variant has no equivalent, and shelling out
-# to flock -c "..." to wrap a block of PowerShell is awkward (it means
+# Deliberately NOT using the Unix `flock` binary: that would work on Linux
+# and macOS, but Windows has no equivalent, and shelling out to
+# flock -c "..." to wrap a block of PowerShell is awkward anyway (it means
 # writing the block out to a temp script file just to invoke it under the
 # lock). Opening a file with FileShare.None instead is a plain .NET
-# primitive available identically on both platforms -- a second process
-# trying to open the same path the same way gets a normal IOException
-# until the first one closes it, which is all a mutex needs to do here.
-# This is advisory locking (it only blocks other code that also calls
-# Enter-Lock/Exit-Lock around the same path) -- fine for this use, since
-# every writer of these particular files is postprocess.ps1 itself.
+# primitive available identically on all three platforms -- a second
+# process trying to open the same path the same way gets a normal
+# IOException until the first one closes it, which is all a mutex needs to
+# do here. This is advisory locking (it only blocks other code that also
+# calls Enter-Lock/Exit-Lock around the same path) -- fine for this use,
+# since every writer of these particular files is postprocess.ps1 itself.
 function Enter-Lock {
     param(
         [Parameter(Mandatory = $true)][string]$LockPath,
@@ -84,14 +113,12 @@ try {
 
     # $dataRoot is the parent of "Youtube Videos" -- derived from $FilePath
     # itself (via $youtubeRoot above), so this correctly reflects whichever
-    # data root was actually used for THIS run (the default $HOME/yt-dlp,
-    # or a custom -DataRoot passed to run_ytdlp.ps1) without needing that
-    # value passed in separately. $installRoot (where scripts/configs live)
-    # is a different, fixed location -- always $HOME/yt-dlp regardless of
-    # -DataRoot -- so it's resolved independently via $HOME below rather
-    # than derived from $FilePath's ancestry.
-    $dataRoot    = Split-Path $youtubeRoot -Parent
-    $installRoot = Join-Path $HOME "yt-dlp"
+    # data root was actually used for THIS run (the platform default, or a
+    # custom -DataRoot passed to run_ytdlp.ps1) without needing that value
+    # passed in separately. $installRoot (where scripts/configs live) is a
+    # different, fixed location regardless of -DataRoot -- resolved in the
+    # platform block at the top rather than derived from $FilePath.
+    $dataRoot = Split-Path $youtubeRoot -Parent
 
     foreach ($d in @($logsDir, $urlsDir)) {
         if (!(Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
@@ -162,6 +189,10 @@ try {
     }
 
     # --- Locate the matching info.json (retry briefly for FS/AV-scan lag) ---
+    # The retry loop matters more on Windows than on the Unix platforms:
+    # real-time antivirus scanning routinely holds a just-written file open
+    # for a moment, so a file that definitely exists can still be briefly
+    # unreadable. Harmless everywhere else -- the first iteration finds it.
     $infoJsonFile = $null
     for ($i = 0; $i -lt 5; $i++) {
         $infoJsonFile = Get-ChildItem -Path $videoMetaDir -Filter "*.info.json" -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -183,8 +214,7 @@ try {
         # Degrade gracefully rather than aborting: still do checksums, the
         # manifest, and (importantly) the Final Video repository sync
         # below, just with blank URL/playlist fields. Recover what we can
-        # from the folder
-        # name itself, which encodes uploader/date/id/title.
+        # from the folder name itself, which encodes uploader/date/id/title.
         Log "WARNING: No .info.json found in $videoMetaDir after retrying. Continuing with filename-derived metadata only."
         $info = $null
         $folderName = Split-Path $videoDir -Leaf
@@ -214,8 +244,10 @@ try {
     # far in that session, not just its own portion. Exact per-video
     # boundaries aren't available for multi-video sessions since yt-dlp
     # doesn't mark them. This matches how you actually run it (one URL
-    # per invocation), where it's a perfect 1:1 copy.
-    $mainDownloadLog = Join-Path $dataRoot "Archive Logs/Logs/$LogFileName"
+    # per invocation), where it's a perfect 1:1 copy. Under -Workers > 1
+    # each worker has its own log (see $LogFileName above), which restores
+    # the 1:1 property for parallel runs too.
+    $mainDownloadLog = Join-Path (Join-Path (Join-Path $dataRoot "Archive Logs") "Logs") $LogFileName
     $completeLogFile = Join-Path $logsDir "video_complete.log"
     $sessionLines = $null
     if (Test-Path $mainDownloadLog) {
@@ -224,12 +256,12 @@ try {
         if ($startMatch) {
             $sessionLines = $allLines[($startMatch.LineNumber - 1)..($allLines.Count - 1)]
             $sessionLines | Set-Content -Path $completeLogFile
-            Log "Wrote video_complete.log (exact copy of this session from download.log)."
+            Log "Wrote video_complete.log (exact copy of this session from $LogFileName)."
         } else {
-            Log "WARNING: No session-start marker found in download.log; video_complete.log not written."
+            Log "WARNING: No session-start marker found in $LogFileName; video_complete.log not written."
         }
     } else {
-        Log "WARNING: download.log not found at $mainDownloadLog; video_complete.log not written."
+        Log "WARNING: $LogFileName not found at $mainDownloadLog; video_complete.log not written."
     }
 
     # Comments are now fetched by a separate pass below, after the video/
@@ -331,6 +363,54 @@ try {
             # working the whole time. Logging each line AS it streams
             # (while still building $commentsOutput for the warning-count
             # check below) fixes that with no change in end behavior.
+            # --- Why --sleep-requests is 0.25 here and not 2 ---
+            # This single number used to dominate the entire runtime of a
+            # download. yt-dlp's comment extractor (_comment_entries in
+            # yt_dlp/extractor/youtube/_video.py) does NOT fetch comments in
+            # bulk: top-level comments arrive ~20 per continuation request,
+            # but EVERY thread with paginated replies costs its own separate
+            # HTTP request, because the extractor recurses into
+            # _comment_entries(..., parent=comment_id) once per thread. So on
+            # a reply-heavy video the request count tracks the number of
+            # THREADS, not comments/20 -- a 2,000-comment video with ~1,200
+            # reply-bearing threads is ~1,260 requests, not ~100.
+            #
+            # --sleep-requests then fires before EVERY ONE of those, inside
+            # InfoExtractor._request_webpage (yt_dlp/extractor/common.py). At
+            # the old value of 2 that was ~1,260 x (2s sleep + ~0.5s real
+            # latency) = ~52 minutes, of which roughly 80% was this process
+            # sleeping on purpose. A 35,000-comment video worked out to
+            # ~22,000 requests and 15+ hours, which matched a real overnight
+            # run that was still going after 14.
+            #
+            # 2 was never a YouTube requirement -- yt-dlp's own default is 0.
+            # The comment endpoint is an unauthenticated InnerTube `next`
+            # POST, considerably cheaper to serve than the player endpoint the
+            # main download pass hits, so it tolerates far more than this.
+            # 0.25 keeps a real (if small) gap between requests and still cuts
+            # the comments pass by roughly 4-5x.
+            #
+            # NOTE: the --sleep-requests 2 in config/yt-dlp.conf is deliberately
+            # left ALONE. That one governs the MAIN download pass, which makes
+            # only a handful of extraction requests (player, formats, subs) and
+            # whose reliability is worth far more than the couple of seconds
+            # lowering it would save. This pass sets --ignore-config, so the two
+            # values are genuinely independent -- do not "fix" the mismatch.
+            #
+            # If this ever needs raising again, the tell is the throttle check
+            # below, not a hunch: watch for retry/incomplete-data lines, and for
+            # the seconds-per-request figure logged at the end of this pass
+            # drifting well above the sleep value.
+            # The `--` before $originalUrl is the end-of-options marker; see
+            # the long note at the single-stream call in run_ytdlp.ps1 for
+            # why every yt-dlp invocation in this pipeline that takes a URL
+            # carries one. It matters here even though $originalUrl comes
+            # out of the info.json rather than off a command line: this pass
+            # re-extracts the video, so an id beginning with a hyphen would
+            # cost the comments of a video that had otherwise downloaded
+            # perfectly -- a partial archive rather than a loud failure,
+            # which is the worse of the two outcomes.
+            $commentsSw = [System.Diagnostics.Stopwatch]::StartNew()
             $commentsOutput = & yt-dlp `
                 --ignore-config `
                 --skip-download `
@@ -338,14 +418,55 @@ try {
                 --write-info-json `
                 --extractor-retries 100 `
                 --retry-sleep "extractor:exp=1:30:2" `
-                --sleep-requests 2 `
+                --sleep-requests 0.25 `
                 -o (Join-Path $commentsTempDir "comments.%(ext)s") `
+                -- `
                 $originalUrl 2>&1 | ForEach-Object {
                     Log "  [comments] $_"
                     $_
                 }
+            $commentsSw.Stop()
 
-            $commentIssues = $commentsOutput | Where-Object { $_ -match '(?i)(warn|error|unable|fail)' }
+            # --- Throttle / pacing telemetry ---
+            # Counts the extractor's own per-request progress lines, so the
+            # cost of this pass is recorded in real numbers rather than
+            # guessed at afterwards. Seconds-per-request is the useful one: it
+            # should sit a little above --sleep-requests above. If it climbs
+            # well beyond that, YouTube is making requests wait (or the retry
+            # backoff is firing), which means the sleep value is no longer what
+            # sets the pace -- and raising it further would not help.
+            # NOTE the '\[comments\]' anchor in all three filters below, and do
+            # not remove it. Log() ends in Write-Output (so its lines bubble up
+            # to the console and download.log via the launcher), which means
+            # that inside the ForEach-Object above, BOTH the timestamped
+            # "  [comments] <line>" copy AND the bare $_ get collected into
+            # $commentsOutput. Every yt-dlp line is therefore in there exactly
+            # twice, and an unanchored -match counts all of them twice: request
+            # counts double, and seconds-per-request comes out at half its true
+            # value. Anchoring on the prefix that only Log() adds picks exactly
+            # one copy per real line. (This also guarantees a string to match
+            # against -- 2>&1 puts ErrorRecord objects, not strings, into the
+            # bare copies.) $commentIssues below had this bug too: its counts
+            # were 2x reality for as long as the streaming-log change has been in.
+            $commentRequests = @($commentsOutput | Where-Object { $_ -match '\[comments\].*Downloading comment.*API JSON' }).Count
+            $commentsElapsed = $commentsSw.Elapsed.TotalSeconds
+            if ($commentRequests -gt 0) {
+                $secsPerReq = [math]::Round($commentsElapsed / $commentRequests, 2)
+                Log ("Comments pass: {0} API request(s) in {1:N0}s ({2}s/request, --sleep-requests 0.25)." -f $commentRequests, $commentsElapsed, $secsPerReq)
+            } else {
+                Log ("Comments pass finished in {0:N0}s (no comment API requests detected)." -f $commentsElapsed)
+            }
+
+            # Retries and incomplete-data warnings are the actual signature of
+            # YouTube pushing back; plain "warning" lines are not (a subtitle
+            # 404 and similar land in the same bucket as a throttle otherwise).
+            # Called out separately so real pushback is not lost in the noise.
+            $throttleSignals = @($commentsOutput | Where-Object { $_ -match '(?i)\[comments\].*(incomplete data|retrying|too many requests|429|rate.?limit)' })
+            if ($throttleSignals.Count -gt 0) {
+                Log "WARNING: $($throttleSignals.Count) retry/throttle signal(s) during the comments pass -- if this recurs, raise --sleep-requests in postprocess.ps1 back toward 1."
+            }
+
+            $commentIssues = $commentsOutput | Where-Object { $_ -match '(?i)\[comments\].*(warn|error|unable|fail)' }
             if ($commentIssues) {
                 Log "WARNING: $($commentIssues.Count) issue(s) during the comments pass (see [comments] lines above)."
             }
@@ -372,6 +493,164 @@ try {
         }
     } catch {
         Log "WARNING: Comments pass failed: $($_.Exception.Message)"
+    }
+
+    # --- Comment completeness audit ---
+    # yt-dlp cannot tell you whether it got all the comments. It has no
+    # ground-truth count to check itself against, so a partial extraction
+    # looks exactly like a complete one: no error, no warning, just fewer
+    # comments in the file. That is not hypothetical -- yt-dlp/yt-dlp#15303
+    # was precisely this, where YouTube's A/B-tested threaded comments view
+    # caused silent extraction of 367 comments out of 684. Fixed upstream in
+    # #15419 (and the fix is in the version this pipeline pins), but the
+    # failure MODE is permanent: comment extraction is scraping, scraping
+    # breaks quietly when YouTube changes its response shape, and an archive
+    # that cannot detect the breakage inherits it forever.
+    #
+    # So: audit, do not re-fetch. This deliberately does NOT use the YouTube
+    # Data API to download comments -- that path would cost real quota and
+    # would lose is_pinned, is_favorited and author_is_verified, none of
+    # which the API exposes at all. yt-dlp remains the only fetcher. All
+    # this does is ask, for 1 quota unit, how many comments YouTube thinks
+    # exist, and compare.
+    #
+    # The local invariants below cost nothing and run unconditionally, even
+    # with no API key. The orphan-reply check is the sharpest of them: a
+    # reply whose parent was never captured is proof of a mid-traversal gap,
+    # detectable with no external call whatsoever.
+    $commentAudit = [ordered]@{
+        merged_count      = $null
+        yt_dlp_reported   = $null
+        api_comment_count = $null
+        api_status        = 'not_attempted'
+        shortfall_ratio   = $null
+        tolerance         = $null
+        duplicate_ids     = $null
+        orphan_replies    = $null
+        pinned_count      = $null
+        audited_at        = (Get-Date).ToString('o')
+    }
+    try {
+        # statistics.commentCount is an APPROXIMATION on YouTube's side -- it
+        # is cached, it drifts, and it is not guaranteed to equal parents plus
+        # replies exactly. Hence a percentage tolerance rather than an equality
+        # check. 5% is loose enough to absorb that drift and still catch the
+        # #15303-class failure by a wide margin (that one was 46% short). Both
+        # raw numbers are recorded in manifest.json on every run, so the real
+        # ratio can be calibrated from actual archive data instead of guessed.
+        $auditTolerance = 0.05
+        if ($env:YTDLP_COMMENT_AUDIT_TOLERANCE) {
+            $parsedTol = 0.0
+            if ([double]::TryParse($env:YTDLP_COMMENT_AUDIT_TOLERANCE, [ref]$parsedTol) -and $parsedTol -ge 0 -and $parsedTol -le 1) {
+                $auditTolerance = $parsedTol
+            } else {
+                Log "WARNING: comment audit -- YTDLP_COMMENT_AUDIT_TOLERANCE is not a number between 0 and 1; using the 0.05 default."
+            }
+        }
+        $commentAudit.tolerance = $auditTolerance
+
+        $auditComments = @()
+        if ($infoJsonFile -and (Test-Path $infoJsonFile.FullName)) {
+            $auditInfo = Get-Content $infoJsonFile.FullName -Raw | ConvertFrom-Json
+            # NOT @($auditInfo.comments) directly: if the property is absent
+            # that yields a one-element array containing $null, and the count
+            # comes out as 1 for a video with no comments at all.
+            if ($auditInfo.comments) { $auditComments = @($auditInfo.comments) }
+            $commentAudit.yt_dlp_reported = $auditInfo.comment_count
+        }
+        $commentAudit.merged_count = $auditComments.Count
+
+        # --- Local invariants: zero quota, no network, always run ---
+        if ($auditComments.Count -gt 0) {
+            $auditIds = New-Object 'System.Collections.Generic.HashSet[string]'
+            $auditDupes = 0
+            foreach ($c in $auditComments) {
+                if ($c.id -and -not $auditIds.Add([string]$c.id)) { $auditDupes++ }
+            }
+            $auditOrphans = 0
+            foreach ($c in $auditComments) {
+                $cParent = [string]$c.parent
+                if ($cParent -and $cParent -ne 'root' -and -not $auditIds.Contains($cParent)) { $auditOrphans++ }
+            }
+            $auditPinned = @($auditComments | Where-Object { $_.is_pinned }).Count
+
+            $commentAudit.duplicate_ids  = $auditDupes
+            $commentAudit.orphan_replies = $auditOrphans
+            $commentAudit.pinned_count   = $auditPinned
+
+            if ($auditDupes -gt 0) {
+                Log "WARNING: comment audit -- $auditDupes duplicate comment id(s) in the merged set."
+            }
+            if ($auditOrphans -gt 0) {
+                Log "WARNING: comment audit -- $auditOrphans repl(ies) whose parent comment was never captured. That is an extraction gap, not a display quirk."
+            }
+            if ($auditPinned -gt 1) {
+                Log "WARNING: comment audit -- $auditPinned comments flagged is_pinned, but YouTube allows at most one per video."
+            }
+        }
+
+        # --- API cross-check: exactly 1 quota unit per video ---
+        $apiKey = $env:YTDLP_YOUTUBE_API_KEY
+        if ([string]::IsNullOrWhiteSpace($apiKey)) {
+            $commentAudit.api_status = 'no_key'
+            Log "Comment audit: local checks only (set YTDLP_YOUTUBE_API_KEY to enable the API cross-check)."
+        } elseif (-not $videoId) {
+            $commentAudit.api_status = 'no_video_id'
+            Log "WARNING: comment audit -- no video id resolved; API cross-check skipped."
+        } else {
+            try {
+                # The key travels in the query string, which is the form the
+                # Data API documents. That means it can appear inside whatever
+                # exception message PowerShell builds from the request URI, so
+                # every message logged from the catch below is passed through
+                # an explicit redaction first. Never log $auditUri itself.
+                $auditUri = "https://www.googleapis.com/youtube/v3/videos?part=statistics&id=$videoId&key=$apiKey"
+                $auditResp = Invoke-RestMethod -Uri $auditUri -Method Get -TimeoutSec 30 -ErrorAction Stop
+                $auditItem = @($auditResp.items) | Select-Object -First 1
+                if (-not $auditItem) {
+                    $commentAudit.api_status = 'video_not_found'
+                    Log "WARNING: comment audit -- the API returned no such video (deleted, private, or region-blocked). Cross-check skipped."
+                } elseif ($null -eq $auditItem.statistics.commentCount) {
+                    $commentAudit.api_status = 'comment_count_unavailable'
+                    Log "Comment audit: the API reports no comment count for this video (comments disabled or hidden)."
+                } else {
+                    $apiCount = [long]$auditItem.statistics.commentCount
+                    $commentAudit.api_comment_count = $apiCount
+                    $commentAudit.api_status = 'ok'
+                    if ($apiCount -gt 0) {
+                        $auditRatio = [math]::Round(1 - ($commentAudit.merged_count / $apiCount), 4)
+                        # Clamp: archiving MORE than the reported count is normal
+                        # (the statistic lags, and yt-dlp sees replies the count
+                        # may not include). A negative shortfall is not a finding.
+                        if ($auditRatio -lt 0) { $auditRatio = 0 }
+                        $commentAudit.shortfall_ratio = $auditRatio
+                        if ($auditRatio -gt $auditTolerance) {
+                            Log ("WARNING: comment audit -- archived {0} of ~{1} comments the API reports ({2}% short, tolerance {3}%). Worth re-running the comments pass for this video." -f $commentAudit.merged_count, $apiCount, [math]::Round($auditRatio * 100, 1), [math]::Round($auditTolerance * 100, 1))
+                        } else {
+                            Log ("Comment audit: archived {0} vs ~{1} reported by the API -- within tolerance." -f $commentAudit.merged_count, $apiCount)
+                        }
+                    }
+                }
+            } catch {
+                $auditMsg = $_.Exception.Message
+                if ($apiKey) { $auditMsg = $auditMsg -replace [regex]::Escape($apiKey), '<redacted>' }
+                $auditCode = $null
+                try { $auditCode = [int]$_.Exception.Response.StatusCode } catch { }
+                if ($auditCode -eq 403) {
+                    $commentAudit.api_status = 'forbidden_or_quota'
+                    Log "WARNING: comment audit -- API returned 403: daily quota exhausted, key restricted, or YouTube Data API v3 not enabled on the project. Audit skipped; the download itself is unaffected."
+                } elseif ($auditCode -eq 400) {
+                    $commentAudit.api_status = 'bad_request'
+                    Log "WARNING: comment audit -- API returned 400, which almost always means YTDLP_YOUTUBE_API_KEY is malformed. Audit skipped; the download itself is unaffected."
+                } else {
+                    $commentAudit.api_status = 'error'
+                    Log "WARNING: comment audit -- API call failed: $auditMsg"
+                }
+            }
+        }
+    } catch {
+        $commentAudit.api_status = 'audit_failed'
+        Log "WARNING: comment audit failed entirely: $($_.Exception.Message)"
     }
 
     # --- Re-embed the (now comment-complete) info.json into the .mkv ---
@@ -424,25 +703,62 @@ try {
     }
 
     # --- Every file + hash under the video folder ---
+    # video_postprocessing.log is deliberately EXCLUDED, and this fixes a
+    # real defect rather than being a stylistic choice. That file is this
+    # script's own live log: hashing it here captures its contents as of
+    # this moment, and then the Log calls for the remaining six steps
+    # (checksums written, manifest written, manifests updated, Channel Info,
+    # Final Video sync, "Post-processing complete") append to it. Its
+    # recorded hash was therefore guaranteed stale before the script even
+    # exited -- every video ever produced had exactly one entry in
+    # checksums.sha256 that could never verify. Confirmed with
+    # `sha256sum -c`: 9 of 10 OK, video_postprocessing.log FAILED.
+    #
+    # That matters more than one wrong line. A checksum manifest that always
+    # reports a failure teaches you to ignore its failures, which is the one
+    # thing an integrity file must never do -- and it would mask a genuine
+    # bit-rot or truncation finding among the noise. archive-viewer.py's own
+    # default_cache_dir() takes pains to stay outside the archive for exactly
+    # this reason, so the intent that these checksums actually verify is
+    # already established elsewhere in the project.
+    #
+    # video_complete.log is NOT excluded: it is written once, in full,
+    # earlier in this script and never appended to again, so its hash is
+    # stable. The exclusion is specifically the file still being written.
+    $selfLogRelPath = "Logs/video_postprocessing.log"
     $allFiles = Get-ChildItem -Path $videoDir -Recurse -File
     $fileHashes = [ordered]@{}
     $fileList = @()
     foreach ($f in $allFiles) {
-        $rel = $f.FullName.Substring($videoDir.Length + 1)
+        # Relative path, with the separator normalized to "/" regardless of
+        # platform. Without this, the same video archived on Windows and on
+        # Linux/macOS produces manifests and checksum files whose every key
+        # differs only by "\" vs "/" -- which makes them non-comparable
+        # across machines and breaks any consumer (archive-viewer.py
+        # included) that looks a path up by name. "/" is the portable
+        # choice: Windows accepts it everywhere as a path separator, so a
+        # value read back from the manifest still resolves natively there.
+        $rel = $f.FullName.Substring($videoDir.Length + 1).Replace([System.IO.Path]::DirectorySeparatorChar, '/')
+        if ($rel -eq $selfLogRelPath) { continue }
         $fileList += $rel
         $hash = (Get-FileHash -Path $f.FullName -Algorithm SHA256).Hash
         $fileHashes[$rel] = $hash
     }
 
     # --- Checksums file (#10) ---
+    # Two-space separator between hash and path is the standard sha256sum
+    # format, so this file can be verified directly with the system tool:
+    #   sha256sum -c checksums.sha256    (Linux)
+    #   shasum -a 256 -c checksums.sha256 (macOS)
     $checksumLines = $fileHashes.GetEnumerator() | ForEach-Object { "$($_.Value)  $($_.Key)" }
     $checksumLines | Set-Content (Join-Path $videoMetaDir "checksums.sha256")
     Log "Wrote checksums for $($fileList.Count) files."
 
     # --- Config version, tool versions ---
-    # $installRoot (fixed at $HOME/yt-dlp), not $dataRoot -- configs/ lives
-    # with the pipeline install, not with a possibly-custom data root.
-    $confPath = Join-Path $installRoot "configs/yt-dlp.conf"
+    # $installRoot (resolved in the platform block at the top), not
+    # $dataRoot -- configs/ lives with the pipeline install, not with a
+    # possibly-custom data root.
+    $confPath = Join-Path (Join-Path $installRoot "configs") "yt-dlp.conf"
     $configVersion = $null
     if (Test-Path $confPath) {
         $m = Select-String -Path $confPath -Pattern "CONFIG_VERSION:\s*(\S+)" | Select-Object -First 1
@@ -451,10 +767,12 @@ try {
     $ytDlpVersion  = (& yt-dlp --version) 2>$null
     $ffmpegRaw     = (& ffmpeg -version) 2>$null
     $ffmpegVersion = if ($ffmpegRaw) { ($ffmpegRaw -split "`n")[0] } else { $null }
-    # Get-CimInstance (used in the Windows version) is WMI-based and doesn't
-    # exist on Linux. $PSVersionTable.OS is a built-in pwsh property that
-    # returns the OS version string identically cross-platform, no branching
-    # needed.
+    # Get-CimInstance (which the old Windows-only copy of this script used)
+    # is WMI-based and doesn't exist off Windows. $PSVersionTable.OS is a
+    # built-in pwsh property that returns a descriptive OS version string
+    # identically on all three platforms, so no branching is needed here at
+    # all -- one of the several places where "cross-platform" cost nothing
+    # more than picking the portable API in the first place.
     $osCaption     = $PSVersionTable.OS
 
     # --- manifest.json (#8) ---
@@ -476,6 +794,7 @@ try {
         subtitle_languages      = $subLangs
         every_filename          = $fileList
         file_hashes             = $fileHashes
+        comment_audit           = $commentAudit
     }
     $manifest | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $videoMetaDir "manifest.json")
     Log "Wrote manifest.json."
@@ -549,21 +868,45 @@ try {
             $throttleMarker = Join-Path $channelInfoDir ".last_refresh"
             $throttleHours = 6
             $needsRefresh = $true
+            # -Force is REQUIRED here, and its absence was a real bug.
+            # PowerShell maps the Unix "leading dot means hidden" convention
+            # onto the Hidden file attribute, and Get-Item without -Force
+            # refuses to return a hidden item -- it throws "Could not find
+            # item", even though Test-Path on the same path just returned
+            # true. Every marker file in this pipeline is dot-prefixed, so
+            # this hits all of them on Linux and macOS. It does NOT hit
+            # Windows, where a leading dot carries no meaning, which is why
+            # it survived unnoticed in a Windows-first codebase.
+            #
+            # The consequence here was worse than a missed optimization.
+            # $ErrorActionPreference is "Stop" for this script, so the throw
+            # escaped to this block's catch, meaning that from the moment
+            # .last_refresh first existed, the Channel Info refresh was
+            # never throttled AND never ran -- every subsequent video logged
+            # "Channel Info refresh failed" and the marker was never
+            # rewritten. Channel avatars, banners and descriptions silently
+            # stopped being updated after the first video in each channel.
+            # Only the read side is affected: Set-Content writes to a hidden
+            # file (and creates one) perfectly well, which is why the marker
+            # still appeared to be maintained.
             if (Test-Path $throttleMarker) {
-                $age = (Get-Date) - (Get-Item $throttleMarker).LastWriteTime
+                $age = (Get-Date) - (Get-Item $throttleMarker -Force).LastWriteTime
                 if ($age.TotalHours -lt $throttleHours) { $needsRefresh = $false }
             }
 
             if (-not $channelUrl) {
-                Log "No channel_url found in info.json — skipped Channel Info refresh."
+                Log "No channel_url found in info.json -- skipped Channel Info refresh."
             } elseif (-not $needsRefresh) {
-                Log "Channel Info refreshed within the last $throttleHours hours — skipped."
+                Log "Channel Info refreshed within the last $throttleHours hours -- skipped."
             } else {
                 # Only clear the folder once we're actually about to repopulate it.
                 # Join-Path (not a literal "\*" suffix, which only means anything
                 # on Windows) so this works whichever OS this happens to run on.
                 Remove-Item -Path (Join-Path $channelInfoDir "*") -Recurse -Force -ErrorAction SilentlyContinue
 
+                # `--` again, same rule as the comments pass above. A channel
+                # URL built from a custom handle (/@-SomeChannel) is the case
+                # this one guards.
                 & yt-dlp `
                     --ignore-config `
                     --skip-download `
@@ -573,6 +916,7 @@ try {
                     --write-all-thumbnails `
                     --write-description `
                     -o (Join-Path $channelInfoDir "channel.%(ext)s") `
+                    -- `
                     $channelUrl 2>&1 | ForEach-Object { Log "  [channel-info] $_" }
 
                 Set-Content -Path $throttleMarker -Value (Get-Date -Format "o")
