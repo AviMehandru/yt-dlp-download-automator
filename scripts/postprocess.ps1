@@ -98,6 +98,36 @@ function Exit-Lock {
     if ($LockHandle) { $LockHandle.Close(); $LockHandle.Dispose() }
 }
 
+# --- The archive layout contract ---
+#
+# The SHAPE of what this script writes -- the per-video folder tree, the
+# names of the subfolders inside it, and the fields in manifest.json -- is
+# consumed by readers that do not all live in this repository.
+# archive-viewer.py is one and ships alongside; a separate desktop
+# application is another and does not. Every one of them rediscovers videos
+# by walking
+#
+#   Complete Archive/<Uploader>/<Uploader> - <date> - <id> - <title>/
+#
+# and reading Video metadata/, Final files/, Subtitles/ and Images/ by name.
+#
+# Until now that was an invariant held together by comments and by the fact
+# that every reader lived in this repo and its test suite. A reader outside
+# it has no such protection: change an -o template in yt-dlp.conf and that
+# reader finds nothing, with no error anywhere -- its tests still pass, this
+# repo's tests still pass, and the first sign of trouble is an empty library
+# in somebody's window.
+#
+# So the layout now carries a version, recorded in every manifest.json.
+# BUMP THIS whenever a change would make an existing reader wrong:
+#   - renaming or re-nesting any per-video subfolder
+#   - changing the "<uploader> - <date> - <id> - <title>" folder-name form
+#   - removing a manifest.json field, or changing what an existing one means
+# Adding a NEW manifest field is backward-compatible and needs no bump.
+# See docs/archive-layout.md for the full contract and for the rule a
+# consumer is expected to apply to this number.
+$ArchiveLayoutVersion = 1
+
 try {
     # FilePath = .../<Uploader> - <Date> - <Id> - <Title>/Final files/<name>.mkv
     $finalFilesDir = Split-Path $FilePath -Parent
@@ -777,6 +807,10 @@ try {
 
     # --- manifest.json (#8) ---
     $manifest = [ordered]@{
+        # First field on purpose: a consumer that cannot understand this
+        # layout should be able to find that out from the head of the file
+        # rather than after parsing all of it.
+        archive_layout_version = $ArchiveLayoutVersion
         archive_creation_time = (Get-Date).ToString("o")
         yt_dlp_version         = $ytDlpVersion
         ffmpeg_version          = $ffmpegVersion
