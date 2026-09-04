@@ -1,12 +1,12 @@
 <#
 .SYNOPSIS
-    Steps 7-15 of the installer, shared by every platform.
+    Steps 7-14 of the installer, shared by every platform.
 
 .DESCRIPTION
     setup.sh (Linux and macOS) and setup.ps1 (Windows) are BOOTSTRAPS. They
     do Steps 1-6 -- everything that has to talk to a specific operating
     system's package manager, plus installing pwsh itself -- and then hand
-    over to this file for the rest. Steps 7-15 are the ones where the three
+    over to this file for the rest. Steps 7-14 are the ones where the three
     platforms were doing substantially the same work in two languages:
     fetching the project files, creating the folder tree, copying files
     into place, writing the launchers, wiring PATH, and verifying. That is
@@ -21,7 +21,7 @@
     macOS, and VLC via winget on Windows -- three implementations of one
     sentence, with no shared body to factor out. Merging those would mean
     writing a package-manager abstraction in PowerShell that duplicates
-    the one setup.sh already needs for its own Steps 1-2. Steps 7-15, by
+    the one setup.sh already needs for its own Steps 1-2. Steps 7-14, by
     contrast, are the same work everywhere, with small $IsWindows branches.
 
     NOTE ON STEP ORDER. Steps 5 and 6 here (VMware, desktop previews) were
@@ -32,15 +32,10 @@
     rather than two separate handoffs.
 
     The step COUNT went from 12 to 14 when PO token support landed: Node.js
-    (Step 9) and the provider build (Step 13), and from 14 to 15 when the
-    desktop GUI landed (Step 14, the cargo build). Those three are why the
-    shared half now runs 7-15 rather than 7-12. The count is still identical
-    across platforms, so a log from any of them still reads "Step N/15" and
-    stays directly comparable.
-
-    The GUI step is the only OPTIONAL one in the whole installer: it detects
-    a Rust toolchain, skips with an explanation when there is none, and never
-    fails the install. Everything else here is a dependency of downloading.
+    (Step 9) and the provider build (Step 13). Those two are why the shared
+    half now runs 7-14 rather than 7-12. The count is still identical across
+    platforms, so a log from any of them still reads "Step N/14" and stays
+    directly comparable.
 
     REQUIRES pwsh 7, which Step 4 of the bootstrap installs. That is a real
     behavior change worth stating plainly: previously, if the pwsh install
@@ -56,8 +51,8 @@
     Videos/ live. Chosen by the bootstrap, which knows the platform default.
 
 .PARAMETER LocalBin
-    The user-owned directory that goes on PATH and holds the `ytdl`,
-    `ytdl-view` and (when the GUI is built) `ytdl-gui` commands.
+    The user-owned directory that goes on PATH and holds the `ytdl` and
+    `ytdl-view` commands.
 
 .PARAMETER SourceDir
     Where the bootstrap itself lives. Files found here (either at their
@@ -101,7 +96,7 @@ param(
     [Parameter(Mandatory = $true)] [string]   $SourceDir,
     [string]   $PlatformLabel     = "unknown",
     [int]      $StartStep         = 6,
-    [int]      $TotalSteps        = 15,
+    [int]      $TotalSteps        = 14,
     [string]   $InheritedWarningsFile = "",
     [switch]   $HasDesktop
 )
@@ -137,7 +132,7 @@ function Draw-ProgressBar {
 }
 
 # Write-Step does double duty: per-step header AND step counter, so the
-# bar's count and the "Step N/15" numbering cannot drift apart -- there is
+# bar's count and the "Step N/14" numbering cannot drift apart -- there is
 # only one place that increments anything.
 function Write-Step {
     param([string]$Message)
@@ -405,24 +400,6 @@ if (-not $nodeOk) {
 # Keep this list in sync with the Install-ProjectFile calls in Step 11: a
 # file downloaded but never copied is dead weight, and a file copied but
 # never downloaded only works when it happens to sit beside the installer.
-# ONE list, even though the GUI half of it is installed by a loop rather
-# than by a named call per file. Splitting it in two was the obvious thing
-# to write and the wrong thing to ship: 070-installer asserts that
-# everything downloaded is also installed and vice versa, and it finds the
-# set by reading this literal -- so a second list is a set of files that
-# invariant silently stops covering.
-#
-# The gui/ entries are a SOURCE TREE, not a binary: they are compiled on
-# this machine in Step 14, which is skipped entirely when Rust is absent.
-# Eighteen files fetched one at a time is clumsy next to a clone, but Step 9
-# does not clone -- deliberately, so git remains a dependency of nothing in
-# this project -- and special-casing the GUI would be the only place that
-# rule is broken.
-#
-# Bare filenames must stay unique across the WHOLE list: a file that is
-# downloaded rather than found beside the installer lands flat in
-# $DownloadDir under its basename, so a second "main.rs" anywhere in the
-# repo would silently overwrite this one.
 $ProjectFiles = @(
     "scripts/run_ytdlp.ps1",
     "scripts/postprocess.ps1",
@@ -430,40 +407,8 @@ $ProjectFiles = @(
     "scripts/pot-provider.ps1",
     "scripts/archive-viewer.py",
     "config/yt-dlp.conf",
-    $LauncherSrc,
-
-    "gui/src/index.html",
-    "gui/src/app.css",
-    "gui/src/app.js",
-    "gui/src-tauri/Cargo.toml",
-    # Fetched, not regenerated. Without the lockfile cargo resolves whatever
-    # is newest-compatible at install time, and Tauri moved a protocol
-    # handler's first argument from &AppHandle to UriSchemeContext WITHIN
-    # 2.x -- a build that worked last month failing today, on a machine
-    # where nothing changed, is the exact failure a lockfile exists to
-    # prevent.
-    "gui/src-tauri/Cargo.lock",
-    "gui/src-tauri/build.rs",
-    "gui/src-tauri/tauri.conf.json",
-    "gui/src-tauri/capabilities/default.json",
-    "gui/src-tauri/src/main.rs",
-    "gui/src-tauri/src/paths.rs",
-    "gui/src-tauri/src/pipeline.rs",
-    "gui/src-tauri/src/archive.rs",
-    "gui/src-tauri/src/media.rs",
-    "gui/src-tauri/src/health.rs",
-    "gui/src-tauri/icons/32x32.png",
-    "gui/src-tauri/icons/128x128.png",
-    "gui/src-tauri/icons/128x128@2x.png",
-    "gui/src-tauri/icons/icon.png",
-    "gui/src-tauri/icons/icon.ico"
+    $LauncherSrc
 )
-
-# Derived, never maintained by hand -- the "gui/" prefix IS the definition of
-# "part of the GUI", so a file added to the list above cannot be forgotten
-# here, and the loop in Step 12 that installs them cannot fall out of step
-# with what Step 9 fetched.
-$GuiFiles = @($ProjectFiles | Where-Object { $_ -like 'gui/*' })
 
 Write-Step "Downloading project files"
 New-Item -ItemType Directory -Path $DownloadDir -Force | Out-Null
@@ -572,29 +517,6 @@ Install-ProjectFile -RepoPath "scripts/pot-provider.ps1"  -Destination (Join-Pat
 Install-ProjectFile -RepoPath "scripts/archive-viewer.py" -Destination (Join-Path $ScriptsDir "archive-viewer.py") -Label "archive-viewer.py"
 Install-ProjectFile -RepoPath "config/yt-dlp.conf"        -Destination (Join-Path $ConfigsDir "yt-dlp.conf")       -Label "yt-dlp.conf"
 Install-ProjectFile -RepoPath $LauncherSrc                -Destination $LauncherDst                                -Label "ytdl"
-
-# --- The GUI source tree ---
-# Placed under $GuiDir with its repo-relative structure INTACT, unlike every
-# other installed file, which is flattened into scripts/ or configs/. That is
-# not a style choice: cargo resolves Cargo.toml, build.rs, src/ and the
-# frontendDist path in tauri.conf.json relative to each other, so a flattened
-# copy would not build. The mirrored layout is also what makes an edit-then-
-# rebuild loop work the same way here as it does in a clone.
-#
-# A failure to place these is a WARNING like everything else in this step:
-# the pipeline is complete without the GUI, and the build step below reports
-# what is missing rather than the install ending here.
-$GuiDir = Join-Path $DataRoot "gui"
-$GuiInstalled = $true
-foreach ($repoPath in $GuiFiles) {
-    $relative   = $repoPath.Substring("gui/".Length)
-    $destination = Join-Path $GuiDir ($relative -replace '/', [System.IO.Path]::DirectorySeparatorChar)
-    $parent = Split-Path -Parent $destination
-    if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-    $before = $Warnings.Count
-    Install-ProjectFile -RepoPath $repoPath -Destination $destination -Label $relative
-    if ($Warnings.Count -ne $before) { $GuiInstalled = $false }
-}
 
 $ViewerPath = Join-Path $ScriptsDir "archive-viewer.py"
 
@@ -749,83 +671,7 @@ if (-not $nodeOk) {
     }
 }
 
-# --- Step 14: build the desktop GUI ---
-# Optional, and last before verification, because it is by far the slowest
-# step (a first Tauri build compiles several hundred crates) and because
-# nothing else depends on its result. An install that stops here is a
-# complete, working archiver that simply has no window.
-#
-# Rust is NOT installed by this script, unlike pwsh, deno, Node and
-# yt-dlp. Those are dependencies of downloading; a Rust toolchain is a
-# dependency only of the GUI, it is ~1.5 GB, and rustup's installer is
-# another unverified curl-to-shell of exactly the kind SECURITY.md already
-# flags one instance of. So this step DETECTS cargo and skips politely if
-# it is absent, printing the one command that would fix it.
-Write-Step "Building the desktop GUI (optional)"
-$GuiSrcTauri = Join-Path $GuiDir "src-tauri"
-$CargoCmd = Get-Command cargo -ErrorAction SilentlyContinue
-if (-not $GuiInstalled) {
-    Write-Warn "Skipping the GUI build: some of its source files were not installed in Step 12. The pipeline itself is unaffected -- 'ytdl' and 'ytdl-view' work regardless."
-} elseif (-not $CargoCmd) {
-    Write-Host "No Rust toolchain found, so the desktop GUI was not built. This is optional --"
-    Write-Host "'ytdl' and 'ytdl-view' are unaffected. To build it later:"
-    Write-Host "    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup.sh && sh rustup.sh"
-    Write-Host "    cargo build --release --manifest-path `"$(Join-Path $GuiSrcTauri 'Cargo.toml')`""
-    Write-Host "  then re-run this installer to get the 'ytdl-gui' launcher."
-} else {
-    # On Linux the webview is a SYSTEM library, not something cargo can
-    # fetch, and its absence produces a pkg-config error hundreds of lines
-    # into a build. Checked up front so the message names the packages.
-    $webkitOk = $true
-    if ($IsLinux) {
-        $pkgConfig = Get-Command pkg-config -ErrorAction SilentlyContinue
-        if ($pkgConfig) {
-            & pkg-config --exists webkit2gtk-4.1 2>$null
-            if ($LASTEXITCODE -ne 0) { $webkitOk = $false }
-        } else {
-            $webkitOk = $false
-        }
-    }
-    if (-not $webkitOk) {
-        Write-Warn "Skipping the GUI build: the WebKitGTK development files are missing. On Debian/Ubuntu: sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev patchelf. On Fedora: sudo dnf install webkit2gtk4.1-devel gtk3-devel librsvg2-devel. Then re-run this installer."
-    } else {
-        Write-Host "Compiling (a first build takes several minutes and is mostly dependencies)..."
-        try {
-            & cargo build --release --manifest-path (Join-Path $GuiSrcTauri "Cargo.toml")
-            $guiBinary = Join-Path $GuiSrcTauri (Join-Path "target/release" $(if ($IsWindows) { "ytdl-gui.exe" } else { "ytdl-gui" }))
-            if (Test-Path $guiBinary) {
-                # Same reasoning as the ytdl-view launcher above: a one-line
-                # shim is generated rather than shipped, so there is no repo
-                # file whose only purpose is to be copied.
-                if ($IsWindows) {
-                    $guiLauncher = Join-Path $LocalBin "ytdl-gui.cmd"
-                    $body = @"
-@echo off
-REM Generated by setup-common.ps1 -- thin launcher for the desktop GUI.
-start "" "$guiBinary" %*
-"@
-                    Set-Content -Path $guiLauncher -Value $body -Encoding ASCII
-                } else {
-                    $guiLauncher = Join-Path $LocalBin "ytdl-gui"
-                    $body = @"
-#!/usr/bin/env bash
-# Generated by setup-common.ps1 -- thin launcher for the desktop GUI.
-exec "$guiBinary" "`$@"
-"@
-                    Set-Content -Path $guiLauncher -Value $body -Encoding UTF8
-                    & chmod +x $guiLauncher
-                }
-                Write-Host "Installed ytdl-gui -> $guiLauncher"
-            } else {
-                Write-Warn "The GUI build reported success but $guiBinary is not there. Build it by hand with: cargo build --release --manifest-path `"$(Join-Path $GuiSrcTauri 'Cargo.toml')`""
-            }
-        } catch {
-            Write-Warn "The GUI build failed ($($_.Exception.Message)). The pipeline is unaffected -- 'ytdl' and 'ytdl-view' work regardless. Re-try by hand with: cargo build --release --manifest-path `"$(Join-Path $GuiSrcTauri 'Cargo.toml')`""
-        }
-    }
-}
-
-# --- Step 15: verify ---
+# --- Step 14: verify ---
 # yt-dlp and deno are installed into $LocalBin rather than by a package
 # manager, so both are checked via their full paths rather than as bare
 # commands. A bare lookup produces a false NOT FOUND on a fresh install:

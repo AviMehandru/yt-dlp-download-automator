@@ -78,24 +78,7 @@ Describe 'Installer invariants' {
                        ForEach-Object { $_.Groups[1].Value })
         $installsLauncherVariable = $text -match 'Install-ProjectFile\s+-RepoPath\s+\$LauncherSrc'
 
-        # The GUI is a source TREE, so it is installed by a loop over
-        # $GuiFiles rather than by a named call per file -- eighteen
-        # Install-ProjectFile lines that differ only in their path would be
-        # the worse code. The invariant still has to hold for it, so the
-        # loop is checked structurally instead: $GuiFiles must be derived
-        # from $ProjectFiles (not a hand-kept second list, which is exactly
-        # the drift this test exists to catch) and must be installed.
-        $guiDeclared = @($declared | Where-Object { $_ -like 'gui/*' })
-        if ($guiDeclared.Count) {
-            Assert-FileMatches $setupCommon `
-                '\$GuiFiles\s*=\s*@\(\s*\$ProjectFiles\s*\|\s*Where-Object' `
-                '$GuiFiles must be DERIVED from $ProjectFiles -- a second hand-kept list is how a file ends up downloaded but never installed'
-            Assert-FileMatches $setupCommon `
-                '(?s)foreach\s*\(\$repoPath\s+in\s+\$GuiFiles\).*?Install-ProjectFile' `
-                'the gui/ files are declared in $ProjectFiles but nothing installs them'
-        }
-
-        foreach ($file in ($declared | Where-Object { $_ -notlike 'gui/*' })) {
+        foreach ($file in $declared) {
             Assert-True ($installed -contains $file) `
                 "$file is downloaded by Step 9 but never installed by Step 11 -- it is dead weight"
         }
@@ -211,27 +194,6 @@ Describe 'Installer dry run (shared half)' {
             foreach ($sub in @('scripts', 'config')) {
                 Copy-Item -LiteralPath (Join-Path $script:RepoRoot $sub) -Destination (Join-Path $sourceDir $sub) -Recurse -Force
             }
-            # gui/ is copied too, because Step 9 now lists its files -- without
-            # it the run would FETCH them from GitHub, turning an offline dry
-            # run into a network test and leaving warnings that stop Step 12
-            # from cleaning up its scratch folder.
-            #
-            # Copied file-by-file from $ProjectFiles rather than with
-            # -Recurse, and that is not fussiness: src-tauri/target/ is a
-            # cargo build directory that reaches several GB once the GUI has
-            # been built once, and -Recurse would copy all of it into a temp
-            # folder on every test run.
-            $guiSources = @([regex]::Matches(
-                (Get-Content -LiteralPath (Join-Path $script:RepoRoot 'scripts/setup-common.ps1') -Raw),
-                '"(gui/[^"]+)"') | ForEach-Object { $_.Groups[1].Value })
-            foreach ($rel in $guiSources) {
-                $from = Join-Path $script:RepoRoot $rel
-                if (-not (Test-Path -LiteralPath $from)) { continue }
-                $to = Join-Path $sourceDir ($rel -replace '/', [System.IO.Path]::DirectorySeparatorChar)
-                $toParent = Split-Path -Parent $to
-                if (-not (Test-Path $toParent)) { New-Item -ItemType Directory -Path $toParent -Force | Out-Null }
-                Copy-Item -LiteralPath $from -Destination $to -Force
-            }
 
             $localBin = Join-Path $r.Root 'bin'
             New-Item -ItemType Directory -Path $localBin -Force | Out-Null
@@ -261,10 +223,12 @@ echo "deno 2.0.0-stub"' -Encoding utf8
 
             $common = Join-Path $sourceDir 'scripts/setup-common.ps1'
             # -TotalSteps is READ from the file rather than written here.
-            # It used to be a literal 12, left behind when the count grew,
-            # which made the overshoot assertion below compare the run
-            # against a total that had not been true for two releases -- it
-            # only ever passed because an earlier assertion failed first.
+            # It used to be a literal 12, left behind when the count grew to
+            # 14, which made the two assertions below compare the run against
+            # a total that had not been true for two releases. They only ever
+            # passed because an earlier assertion failed first and masked
+            # them. Deriving it means this test cannot go stale again the
+            # next time a step is added.
             $declaredTotal = [int]([regex]::Match(
                 (Get-Content -LiteralPath $common -Raw), '\$TotalSteps\s*=\s*(\d+)').Groups[1].Value)
             Assert-True ($declaredTotal -gt 0) 'could not read $TotalSteps out of setup-common.ps1'
