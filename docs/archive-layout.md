@@ -16,9 +16,32 @@ clear message.
 
 ## The current version
 
-**`ARCHIVE_LAYOUT_VERSION = 1`**, defined as `$ArchiveLayoutVersion` at the
+**`ARCHIVE_LAYOUT_VERSION = 2`**, defined as `$ArchiveLayoutVersion` at the
 top of `scripts/postprocess.ps1` and written as `archive_layout_version`, the
 first field of every `Video metadata/manifest.json`.
+
+### What changed in 2
+
+Version 2 exists because `--mode` made the media file's name variable, where
+version 1 could assume it was always `Final Video.mkv`.
+
+- **Audio-only runs write `Final Audio.<ext>`**, not `Final Video.<ext>`.
+- **The extension varies** even for video: `--container` selects `.mkv`,
+  `.mp4` or `.webm`, and audio-only produces whatever the source stream is
+  (`.m4a`, `.opus`, `.webm`) or whatever `--audio-codec` re-encoded it to.
+- **A per-video folder may legitimately contain no media file at all.**
+  `--mode metadata-only`, `comments-only` and `subs-only` write the complete
+  folder — manifest, checksums, subfolders, comments — with no media in it.
+
+The rename is what forces the bump. A version-1 reader globs for
+`Final Video.*`, finds nothing in an audio-only folder, and renders an empty
+entry with no error — precisely the silent failure this number converts into
+a message.
+
+**A version-2 reader must find the media file by base name, never by
+extension**, and must treat its absence as a valid state rather than a
+corrupt or interrupted folder. `manifest.json`'s `media_file` field gives the
+answer directly and should be preferred over globbing at all.
 
 ## What the contract covers
 
@@ -32,7 +55,8 @@ first field of every `Video metadata/manifest.json`.
         Channel Info/                     channel-level assets, not a video
         channel_manifest.json
         <Uploader> - <YYYYMMDD> - <id> - <title>/
-          Final files/                    Final Video.mkv, Link.*
+          Final files/                    Final Video.<ext> OR Final Audio.<ext>
+                                          (or neither), Link.*
           Pre-merge streams/              --keep-video's raw f<id> streams
           Subtitles/                      Subtitles.<lang>.vtt
           Images/                         thumbnail images
@@ -69,19 +93,61 @@ Guaranteed present, with at least these fields:
 | `archive_layout_version` | this contract's version |
 | `archive_creation_time` | ISO 8601, when post-processing finished |
 | `yt_dlp_version`, `ffmpeg_version` | tool versions used |
-| `config_file_version` | `CONFIG_VERSION` from `yt-dlp.conf` |
+| `config_file_version` | `CONFIG_VERSION` from `yt-dlp.conf` — the static baseline only |
+| `download_mode` | *(2)* which `--mode` wrote this folder |
+| `media_file` | *(2)* the media file's folder-relative path, or `null` |
+| `run_settings` | *(2)* the per-run overrides; see below |
 | `video_id`, `title`, `uploader`, `upload_date` | identity |
 | `original_url`, `channel_url` | provenance |
 | `codecs`, `subtitle_languages` | what was captured |
 | `every_filename`, `file_hashes` | inventory, paths `/`-separated |
 | `comment_audit` | completeness of the comments pass |
 
+#### `run_settings`, and why `config_file_version` is no longer enough
+
+`config_file_version` records which generation of the **static** baseline in
+`config/yt-dlp.conf` was installed. Until `--mode`, that was a complete
+description of how a video was produced, because nothing could vary between
+runs.
+
+Content options are now appended to the yt-dlp command line *after*
+`--config-location`, where the later option wins. The conf is still never
+rewritten — but its version number no longer implies the settings that were
+actually in force. `run_settings` carries the difference:
+
+| Key | Meaning |
+|---|---|
+| `mode` | the `--mode` value |
+| `quality`, `codec`, `audio_codec`, `container` | the content options as resolved |
+| `no_comments`, `no_subs`, `no_thumbnail`, `no_metadata` | component skips |
+| `passthrough` | raw `--ytdlp-arg` values, in order |
+| `effective_args` | the complete argument list appended after the conf |
+
+Read `config_file_version` **and** `run_settings` together. Either alone is a
+partial answer. `run_settings` may be `null` for a video written by a
+standalone `postprocess.ps1` invocation, which is a valid state.
+
+The full text of the conf at a given version is not duplicated into every
+manifest — that would be tens of lines repeated per video forever. A
+timestamped copy is written once per session into `Archive Logs/Archive
+History/` instead, which is outside this contract and free to change.
+
 ### Things a consumer must tolerate
 
 These are not edge cases; they occur in normal operation:
 
 - **A missing or unparseable `info.json`.** Fall back to the folder name.
-- **A folder with no video file at all.** An interrupted run leaves one.
+- **A folder with no media file at all.** Two different causes now, and a
+  consumer should not try to tell them apart by guessing: an interrupted run
+  leaves one, and so does any of the three no-media modes, on purpose.
+  `download_mode` says which. Neither is corrupt.
+- **A media file that is not `Final Video.mkv`.** *(2)* It may be
+  `Final Video.mp4`, `Final Video.webm`, or `Final Audio.<anything>`. Match
+  on the base name, or just read `media_file` from the manifest. Matching on
+  `.mkv` was correct under layout 1 and is a bug under layout 2.
+- **A video folder with no subtitles, no thumbnail, or no description.**
+  The `--no-subs`, `--no-thumbnail` and `--no-metadata` skips each leave a
+  folder that is complete and correct without them.
 - **`Pre-merge streams/`.** `--keep-video` leaves video-only and audio-only
   files there. A consumer choosing "the" video **must** skip that folder, or
   it will pick a silent video or a black audio track.
@@ -122,7 +188,22 @@ with the highest version that consumer understands.
   explanation is the outcome this whole file exists to prevent.
 
 A consumer should apply this per video, not per archive: an archive written
-across an upgrade legitimately contains both versions.
+across an upgrade legitimately contains both versions — and after the 1→2
+upgrade, most real archives do.
+
+### Upgrading a reader from 1 to 2
+
+Three changes, in the order they bite:
+
+1. **Stop matching on `.mkv` or on `Final Video`.** Prefer `media_file` from
+   the manifest; fall back to globbing `Final Video.*` and `Final Audio.*`,
+   still excluding anything with a format-id segment (`Final Video.f137.mp4`)
+   and still skipping `Pre-merge streams/`.
+2. **Treat a missing media file as ordinary.** Render the entry from its
+   metadata rather than hiding it or reporting corruption.
+3. **Raise the maximum understood version to 2**, and keep reading layout-1
+   videos exactly as before — where `media_file` is absent, `Final Video.mkv`
+   is the correct assumption, because under layout 1 it always was.
 
 ## Where this is enforced
 

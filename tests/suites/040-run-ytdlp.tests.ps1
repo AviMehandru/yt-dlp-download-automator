@@ -290,6 +290,153 @@ the throttle silently never engages on Linux or macOS.
             }
         } finally { Remove-TestRoot $r }
     }
+
+    # -----------------------------------------------------------------
+    # Content selection (archive layout 2)
+    # -----------------------------------------------------------------
+    # The mechanism under test is ordering, not the flags themselves:
+    # these arguments are appended AFTER --config-location so that yt-dlp's
+    # last-wins resolution overrides the conf, which is what lets the conf
+    # stay static and un-rewritten. An assertion that only checked "-f is
+    # present" would pass even if it were emitted before the config file,
+    # where it would be silently overridden instead of overriding.
+
+    It 'appends content options after the config file so they override it' {
+        $r = New-OrchestratorRoot -Label 'content-order' -Behavior $downloadBehavior
+        try {
+            $null = Invoke-RunYtdlp -TestRoot $r -Url 'https://youtu.be/testVideo01' `
+                -ExtraArgs @('-Quality', '720', '-Codec', 'avc1')
+            $call = @(Get-StubCalls -TestRoot $r -Name 'yt-dlp' |
+                      Where-Object { $_.args -contains '--config-location' })[-1]
+
+            $confIdx   = [array]::IndexOf($call.args, '--config-location')
+            $formatIdx = [array]::IndexOf($call.args, '-f')
+            Assert-True ($formatIdx -gt $confIdx) `
+                'a format selector emitted BEFORE --config-location would be overridden by the conf, not override it'
+
+            Assert-Match 'height<=720' $call.line 'the height cap must reach yt-dlp'
+            Assert-Match 'vcodec:avc1' $call.line 'the codec preference must reach yt-dlp'
+            Assert-True ($call.args -contains '-S') `
+                'codec preference must be a --format-sort, not a format filter -- a filter fails a video that offers no avc1 rendition'
+        } finally { Remove-TestRoot $r }
+    }
+
+    It 'keeps a default run byte-for-byte as it was before content options existed' {
+        # The content options are additive. A plain `ytdl <url>` must still
+        # produce the same command line it always did, or every existing
+        # assertion about that command line is testing something new.
+        $r = New-OrchestratorRoot -Label 'content-default' -Behavior $downloadBehavior
+        try {
+            $null = Invoke-RunYtdlp -TestRoot $r -Url 'https://youtu.be/testVideo01'
+            $call = @(Get-StubCalls -TestRoot $r -Name 'yt-dlp' |
+                      Where-Object { $_.args -contains '--config-location' })[-1]
+            Assert-False ($call.args -contains '-f') `
+                'no -f may be added when the mode is full and no cap was asked for -- the conf already says bv*+ba/b'
+            Assert-False ($call.args -contains '-S')
+            Assert-False ($call.args -contains '--skip-download')
+        } finally { Remove-TestRoot $r }
+    }
+
+    It 'turns a component off with its negating flag, not by omission' {
+        # The single easiest way to get this file wrong. The conf has
+        # already set --write-subs by the time these are appended, so
+        # leaving the flag out leaves the conf's value in force and the
+        # skip silently does nothing at all.
+        $r = New-OrchestratorRoot -Label 'content-skips' -Behavior $downloadBehavior
+        try {
+            $null = Invoke-RunYtdlp -TestRoot $r -Url 'https://youtu.be/testVideo01' `
+                -ExtraArgs @('-NoSubs', '-NoThumbnail', '-NoMetadata')
+            $call = @(Get-StubCalls -TestRoot $r -Name 'yt-dlp' |
+                      Where-Object { $_.args -contains '--config-location' })[-1]
+            foreach ($neg in @('--no-write-subs', '--no-write-auto-subs',
+                               '--no-write-thumbnail', '--no-embed-thumbnail',
+                               '--no-write-description', '--no-write-info-json')) {
+                Assert-True ($call.args -contains $neg) `
+                    "$neg must be passed explicitly -- omitting the positive flag cannot override a conf that already set it"
+            }
+        } finally { Remove-TestRoot $r }
+    }
+
+    It 'renames the media file for audio-only by rewriting the conf template' {
+        # The folder shape has exactly one definition, in config/yt-dlp.conf.
+        # This reads that template and swaps only the base name, rather than
+        # carrying a second copy here -- a second copy would be a second
+        # thing to keep correct, and the first symptom of the two
+        # disagreeing would be audio landing outside the archive entirely.
+        $r = New-OrchestratorRoot -Label 'content-audio' -Behavior $downloadBehavior
+        try {
+            $run = Invoke-RunYtdlp -TestRoot $r -Url 'https://youtu.be/testVideo01' `
+                -ExtraArgs @('-Mode', 'audio-only')
+            $call = @(Get-StubCalls -TestRoot $r -Name 'yt-dlp' |
+                      Where-Object { $_.args -contains '--config-location' })[-1]
+
+            Assert-Match 'Final Audio\.%\(ext\)s' $call.line 'audio-only must write Final Audio.<ext>'
+            Assert-NotMatch 'Final Video\.%\(ext\)s' $call.line
+            Assert-Match 'ba/b' $call.line 'audio-only must select a bestaudio format'
+            Assert-NotMatch 'height<=' $call.line `
+                'a height predicate against an audio-only format matches nothing and would empty the candidate list'
+            # The rest of the template -- the uploader/date/id/title folder
+            # shape -- must be carried over unchanged from the conf.
+            Assert-Match '%\(uploader\)\.40s' $call.line 'the per-video folder shape must come from the conf, not be rebuilt here'
+            Assert-Match 'Final files' $call.line
+            Assert-Match 'archive layout 2' ($run.Output -join "`n")
+        } finally { Remove-TestRoot $r }
+    }
+
+    It 'refuses a passthrough argument that would redirect the output' {
+        # --ytdlp-arg exists so yt-dlp options this pipeline has never heard
+        # of still work. The handful refused here are the ones that decide
+        # WHERE files land: overriding them does not produce a
+        # differently-configured archive, it produces files no consumer of
+        # this archive can find, with no error at any layer.
+        $r = New-OrchestratorRoot -Label 'content-denylist' -Behavior $downloadBehavior
+        try {
+            $b64 = [System.Convert]::ToBase64String(
+                [System.Text.Encoding]::UTF8.GetBytes('["-o","/tmp/anywhere/%(title)s.%(ext)s"]'))
+            $run = Invoke-RunYtdlp -TestRoot $r -Url 'https://youtu.be/testVideo01' `
+                -ExtraArgs @('-YtdlpArgsB64', $b64)
+            Assert-NotEqual 0 $run.ExitCode 'a layout-breaking passthrough must fail the run, not be dropped'
+            Assert-Match 'is refused' ($run.Output -join "`n")
+            Assert-Equal 0 @(Get-StubCalls -TestRoot $r -Name 'yt-dlp' |
+                             Where-Object { $_.args -contains '--config-location' }).Count `
+                'the download must not start at all'
+        } finally { Remove-TestRoot $r }
+    }
+
+    It 'passes an accepted passthrough argument through last, after everything it decided' {
+        $r = New-OrchestratorRoot -Label 'content-passthrough' -Behavior $downloadBehavior
+        try {
+            $b64 = [System.Convert]::ToBase64String(
+                [System.Text.Encoding]::UTF8.GetBytes('["--sponsorblock-mark","all"]'))
+            $null = Invoke-RunYtdlp -TestRoot $r -Url 'https://youtu.be/testVideo01' `
+                -ExtraArgs @('-Quality', '480', '-YtdlpArgsB64', $b64)
+            $call = @(Get-StubCalls -TestRoot $r -Name 'yt-dlp' |
+                      Where-Object { $_.args -contains '--config-location' })[-1]
+            $sbIdx = [array]::IndexOf($call.args, '--sponsorblock-mark')
+            $fIdx  = [array]::IndexOf($call.args, '-f')
+            Assert-True ($sbIdx -gt 0) 'the passthrough argument must reach yt-dlp'
+            Assert-True ($sbIdx -gt $fIdx) `
+                'the user''s own arguments come last so --ytdlp-arg genuinely wins over what this script chose'
+        } finally { Remove-TestRoot $r }
+    }
+
+    It 'tells postprocess.ps1 which mode produced the run' {
+        $r = New-OrchestratorRoot -Label 'content-exec' -Behavior $downloadBehavior
+        try {
+            $null = Invoke-RunYtdlp -TestRoot $r -Url 'https://youtu.be/testVideo01' `
+                -ExtraArgs @('-Mode', 'audio-only', '-NoComments')
+            $call = @(Get-StubCalls -TestRoot $r -Name 'yt-dlp' |
+                      Where-Object { $_.args -contains '--exec' })[-1]
+            $execIdx = [array]::IndexOf($call.args, '--exec')
+            $exec = $call.args[$execIdx + 1]
+            Assert-Match '-Mode "audio-only"' $exec `
+                'postprocess.ps1 cannot know which file is final without the mode'
+            Assert-Match '-NoComments' $exec
+            Assert-Match '-RunSettingsB64' $exec `
+                'the settings that produced a video are recorded in its manifest'
+        } finally { Remove-TestRoot $r }
+    }
+
 }
 
 Describe 'run_ytdlp.ps1 parallel dispatch' {
@@ -435,4 +582,28 @@ element and the last one. The guard for `$cutIndex -eq 0 has regressed.
             }
         } finally { Remove-TestRoot $r; $env:YTDLP_TEST_IDS = $null }
     }
+
+    It 'gives every worker the same content options as a single-stream run' {
+        # The bug this exists to prevent, and it is a near miss rather than
+        # a hypothetical: $playlistArgs is deliberately single-stream-only
+        # (its options are applied at enumeration time instead), and
+        # following that shape for $contentArgs would have made every
+        # content option silently do nothing whenever --workers was above 1
+        # -- a wrong archive with no error anywhere.
+        $env:YTDLP_TEST_IDS = 'aaa111,bbb222'
+        $r = New-ParallelRoot -Label 'parallel-content'
+        try {
+            $null = Invoke-RunYtdlp -TestRoot $r -Url 'https://www.youtube.com/@chan/videos' `
+                -ExtraArgs @('-Workers', '2', '-Quality', '720', '-NoSubs')
+            $downloads = @(Get-StubCalls -TestRoot $r -Name 'yt-dlp' |
+                           Where-Object { $_.args -contains '--download-archive' })
+            Assert-Equal 2 $downloads.Count 'both workers must have run'
+            foreach ($d in $downloads) {
+                Assert-Match 'height<=720' $d.line 'a worker download must carry the height cap'
+                Assert-True ($d.args -contains '--no-write-subs') `
+                    'a worker download must carry the component skips'
+            }
+        } finally { Remove-TestRoot $r }
+    }
+
 }

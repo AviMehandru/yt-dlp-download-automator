@@ -431,7 +431,13 @@ function New-VideoFolder {
         [switch]$PreMergeUnrelocated,
         [switch]$PostProcessed,
         [switch]$SeedChannelInfoThrottle,
-        [hashtable]$InfoExtra
+        [hashtable]$InfoExtra,
+        # Archive layout 2: the media file is no longer always
+        # "Final Video.mkv". An audio-only run writes "Final Audio.<ext>",
+        # and --container changes the extension for video. Defaulted to the
+        # layout-1 names so every existing fixture is unchanged.
+        [string]$MediaBaseName = 'Final Video',
+        [string]$MediaExt      = '.mkv'
     )
 
     $videosRoot   = Join-Path $TestRoot.DataRoot 'Youtube Videos'
@@ -453,10 +459,14 @@ function New-VideoFolder {
         New-Item -ItemType Directory -Path $d -Force | Out-Null
     }
 
-    $mkvPath = Join-Path $finalFiles 'Final Video.mkv'
+    $mkvPath = Join-Path $finalFiles ($MediaBaseName + $MediaExt)
     $hasRealMkv = $false
     if (-not $OmitVideoFile) {
-        $hasRealMkv = New-TinyMkv -Path $mkvPath
+        # New-TinyMkv only knows how to write Matroska, so a fixture asking
+        # for another container gets the placeholder path below instead --
+        # which is all the gate and path-derivation tests need. A test that
+        # requires genuinely remuxable bytes checks .HasRealMkv and skips.
+        $hasRealMkv = if ($MediaExt -eq '.mkv') { New-TinyMkv -Path $mkvPath } else { $false }
         if (-not $hasRealMkv) {
             # No ffmpeg on this machine: still create the file so the path
             # logic can be tested. Tests that need a genuinely remuxable
@@ -480,8 +490,8 @@ function New-VideoFolder {
         # downstream of it.
         $preMergeTarget = if ($PreMergeUnrelocated) { $finalFiles } else { Join-Path $videoDir 'Pre-merge streams' }
         New-Item -ItemType Directory -Path $preMergeTarget -Force | Out-Null
-        Set-Content -LiteralPath (Join-Path $preMergeTarget 'Final Video.f248.webm') -Value 'video-only stream' -Encoding utf8
-        Set-Content -LiteralPath (Join-Path $preMergeTarget 'Final Video.f251.webm') -Value 'audio-only stream' -Encoding utf8
+        Set-Content -LiteralPath (Join-Path $preMergeTarget "$MediaBaseName.f248.webm") -Value 'video-only stream' -Encoding utf8
+        Set-Content -LiteralPath (Join-Path $preMergeTarget "$MediaBaseName.f251.webm") -Value 'audio-only stream' -Encoding utf8
     }
 
     $infoPath = Join-Path $metaDir 'Info.info.json'
@@ -569,7 +579,13 @@ function New-VideoFolder {
         MetaDir     = $metaDir
         ImagesDir   = $imagesDir
         SubsDir     = $subsDir
+        # MkvPath keeps its name because every existing test uses it and
+        # renaming it would churn the whole suite for nothing. MediaPath is
+        # the same value under the name that is accurate once the file is
+        # not necessarily an .mkv; prefer it in new tests.
         MkvPath     = $mkvPath
+        MediaPath   = $mkvPath
+        MediaName   = ($MediaBaseName + $MediaExt)
         InfoPath    = $infoPath
         VideoId     = $VideoId
         Uploader    = $Uploader
@@ -761,13 +777,28 @@ function Invoke-Postprocess {
     param(
         [Parameter(Mandatory = $true)]$TestRoot,
         [Parameter(Mandatory = $true)][string]$FilePath,
-        [string]$LogFileName = 'download.log'
+        [string]$LogFileName = 'download.log',
+        # All three are left unbound by default, so the common case
+        # exercises exactly the command line a standalone invocation uses.
+        # That is the documented manual-repair path in CLAUDE.md, and it
+        # must keep working with no new argument to remember -- which is
+        # only actually true if the tests keep running it that way.
+        [string]$Mode,
+        [switch]$NoComments,
+        [hashtable]$RunSettings
     )
     $script = Join-Path $TestRoot.InstallRoot 'scripts/postprocess.ps1'
     $previousInstallRoot = $env:YTDLP_INSTALL_ROOT
     $env:YTDLP_INSTALL_ROOT = $TestRoot.InstallRoot
     try {
-        $output = & (Get-PwshPath) -NoProfile -File $script -FilePath $FilePath -LogFileName $LogFileName 2>&1 |
+        $extra = @()
+        if ($PSBoundParameters.ContainsKey('Mode')) { $extra += @('-Mode', $Mode) }
+        if ($NoComments) { $extra += '-NoComments' }
+        if ($RunSettings) {
+            $extra += @('-RunSettingsB64', [System.Convert]::ToBase64String(
+                [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -Compress -Depth 6 -InputObject $RunSettings))))
+        }
+        $output = & (Get-PwshPath) -NoProfile -File $script -FilePath $FilePath -LogFileName $LogFileName @extra 2>&1 |
                   ForEach-Object { "$_" }
         return [pscustomobject]@{ Output = @($output); ExitCode = $LASTEXITCODE }
     } finally {

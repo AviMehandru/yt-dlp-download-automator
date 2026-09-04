@@ -301,6 +301,116 @@ Check provider health at any time:
 pwsh -File "<install root>/scripts/pot-provider.ps1" -Status
 ```
 
+## What gets downloaded
+
+Everything above decides *which videos* a session covers. The flags in this
+section decide *what is fetched for each one*.
+
+They work by being appended to the yt-dlp command line **after** the config
+file, where the later option wins. `config/yt-dlp.conf` is never rewritten,
+regenerated, or edited by a run — it stays exactly as static as it has always
+been, and these override it the same way `--download-archive` and `--paths`
+already do.
+
+### `--mode MODE`
+
+| Mode | What you get |
+|---|---|
+| `full` *(default)* | Video + audio merged, plus everything else. Unchanged behaviour. |
+| `video-only` | No audio stream. |
+| `audio-only` | No video stream. The media file is named **`Final Audio.<ext>`**. |
+| `metadata-only` | No media at all — info.json, description, thumbnail. |
+| `comments-only` | No media at all — the comments pass only. |
+| `subs-only` | No media at all — subtitles only. |
+
+The three no-media modes still write the **complete per-video folder**:
+manifest, checksums, subfolders, the lot — just with no media file in it. That
+is a valid archive state under layout 2, not a broken one, and it means the
+media can be filled in by a later run without anything else being redone.
+
+```bash
+ytdl "https://youtu.be/VIDEOID" --mode audio-only
+ytdl "https://www.youtube.com/@Chan/videos" --mode comments-only --sync
+```
+
+### `--quality N`, `--codec NAME`, `--container EXT`
+
+```bash
+ytdl "https://youtu.be/VIDEOID" --quality 1080 --codec avc1 --container mp4
+```
+
+`--quality` caps the height (or `best`, the default). It is a cap with an
+unfiltered fallback behind it, so a video whose only rendition is taller still
+downloads rather than failing — an archive that skips a video is worse than one
+that stores it larger than asked.
+
+`--codec` (`any`, `avc1`, `vp9`, `av01`) is a **preference**, not a filter: if
+the codec isn't offered, the best available is still taken. `avc1` is the
+compatibility choice; `av01` is the smallest for a given quality. Note the
+zero in `av01`.
+
+`--container` (`mkv`, `mp4`, `webm`) only matters when a merge actually
+happens. `mkv` stays the default and is the only one of the three that can
+carry the comment-complete `info.json` as a file attachment — under `mp4` or
+`webm` the comments live in the sidecar `info.json` only, which is the system
+of record in every case anyway.
+
+### `--audio-codec NAME`
+
+Only meaningful with `--mode audio-only`. `any` (the default) keeps the
+original stream byte-for-byte; `opus`, `aac`, `mp3` and `flac` re-encode.
+Leaving it alone is what the rest of this pipeline optimises for.
+
+### Leaving components out
+
+| Flag | Effect |
+|---|---|
+| `--no-comments` | Skip the comments pass. Normally the longest stage of a download. |
+| `--no-subs` | No subtitles. |
+| `--no-thumbnail` | No thumbnail downloaded or embedded. |
+| `--no-metadata` | No description or info.json sidecars. |
+| `--no-audio` | Alias for `--mode video-only`. |
+| `--no-video` | Alias for `--mode audio-only`. |
+
+`--no-comments` records `skipped_by_request` in the manifest's
+`comment_audit`, which is what distinguishes "we didn't fetch comments" from
+"we fetched and found none" — only one of those is worth re-running.
+
+`--no-metadata` in a no-media mode still writes the info.json, because that
+file is what triggers post-processing when there is no media file to trigger
+it. The run says so rather than silently producing nothing.
+
+### `--ytdlp-arg ARG`
+
+Passes an argument straight to yt-dlp, after the config file so it wins.
+Repeatable, one value per occurrence:
+
+```bash
+ytdl "https://youtu.be/VIDEOID" --ytdlp-arg --sponsorblock-mark --ytdlp-arg all
+```
+
+One value per occurrence rather than a joined string because a real
+`--match-filter` expression contains spaces, commas and `&`, so no separator
+would be safe.
+
+Arguments that decide **where** files are written are refused:
+`-o`/`--output`, `-P`/`--paths`, `--exec`, `--config-location`,
+`--ignore-config`, `--download-archive`. Overriding one of those doesn't give
+you a differently-configured archive — it gives you files no consumer of the
+archive can find, with no error at any layer. The run stops instead.
+
+### Combinations that are refused
+
+Each of these would otherwise run to completion and produce nothing, or
+something other than what was asked:
+
+```
+--no-audio --no-video                     leaves no media at all
+--no-audio --mode audio-only              the alias contradicts the mode
+--mode comments-only --no-comments        would fetch nothing
+--mode comments-only --quality 1080       the mode downloads no media
+```
+
 ## Combining flags
 
 Any combination is valid — they're independent and only interact through

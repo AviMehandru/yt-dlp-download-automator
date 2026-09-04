@@ -41,11 +41,20 @@ Describe 'postprocess.ps1 gating and file movement' {
         # overwrote manifest.json with that stream's info, and copied the
         # fragment into the Final Video repository over the real video --
         # whichever invocation finished last won.
+        #
+        # Under archive layout 2 the gate tests the file's ROLE (its base
+        # name) rather than its extension, because the final file is no
+        # longer always .mkv: --container selects it, and audio-only writes
+        # "Final Audio.<ext>". A pre-merge stream is still excluded by the
+        # same property it always had -- yt-dlp's format-id sits as an
+        # extra dotted segment before the extension, so anything with a
+        # second dot after the base name is a raw stream, whatever the
+        # extension happens to be.
         $r = New-PostprocessRoot -Label 'pp-gate' -VideoArgs @{ WithPreMergeStreams = $true; PreMergeUnrelocated = $true; SeedChannelInfoThrottle = $true }
         try {
             $stream = Join-Path $r.Video.FinalFiles 'Final Video.f248.webm'
             $result = Invoke-Postprocess -TestRoot $r -FilePath $stream
-            Assert-Match 'Skipped: not the final merged \.mkv' $result.Output
+            Assert-Match "is not this run's final media file" $result.Output
 
             Assert-PathMissing (Join-Path $r.Video.MetaDir 'manifest.json') `
                 'a pre-merge stream must not write a manifest'
@@ -106,6 +115,84 @@ Describe 'postprocess.ps1 gating and file movement' {
                 'the Final Video sync must still happen without an info.json'
         } finally { Remove-TestRoot $r }
     }
+
+    # --- Archive layout 2: the media file is no longer always .mkv --------
+
+    It 'accepts Final Audio as the final file in audio-only mode' {
+        $r = New-PostprocessRoot -Label 'pp-audio-gate' -VideoArgs @{
+            MediaBaseName = 'Final Audio'; MediaExt = '.m4a'; SeedChannelInfoThrottle = $true }
+        try {
+            $result = Invoke-Postprocess -TestRoot $r -FilePath $r.Video.MediaPath -Mode 'audio-only'
+            Assert-NotMatch 'is not this run.s final media file' $result.Output `
+                'audio-only must treat Final Audio.<ext> as the file to process'
+            Assert-PathExists (Join-Path $r.Video.MetaDir 'manifest.json') `
+                'an audio-only run must still produce a full per-video folder'
+        } finally { Remove-TestRoot $r }
+    }
+
+    It 'gates on the role of the file, not on its extension' {
+        # A .mkv is not automatically the file to process, and a non-.mkv is
+        # not automatically a stream to skip. Under --container mp4 the
+        # final file is "Final Video.mp4", and in audio-only mode a stray
+        # "Final Video.mkv" is not this run's output at all.
+        $r = New-PostprocessRoot -Label 'pp-role-gate' -VideoArgs @{
+            MediaBaseName = 'Final Video'; MediaExt = '.mp4'; SeedChannelInfoThrottle = $true }
+        try {
+            $accepted = Invoke-Postprocess -TestRoot $r -FilePath $r.Video.MediaPath
+            Assert-NotMatch 'is not this run.s final media file' $accepted.Output `
+                'a non-.mkv container is still the final file when its base name says so'
+
+            # Same folder, but asked for as an audio-only run: the video
+            # file is now the wrong role and must be skipped outright.
+            $rejected = Invoke-Postprocess -TestRoot $r -FilePath $r.Video.MediaPath -Mode 'audio-only'
+            Assert-Match 'is not this run.s final media file' $rejected.Output
+        } finally { Remove-TestRoot $r }
+    }
+
+    It 'runs off the info.json when the mode downloads no media' {
+        # --skip-download means the after_move hook never fires for a media
+        # file, so the info.json is the trigger instead. It is written in
+        # every no-media mode precisely so this hook has something to fire
+        # on, and exactly once per video, which is what makes it safe as a
+        # single trigger.
+        $r = New-PostprocessRoot -Label 'pp-nomedia' -VideoArgs @{
+            OmitVideoFile = $true; SeedChannelInfoThrottle = $true }
+        try {
+            $result = Invoke-Postprocess -TestRoot $r -FilePath $r.Video.InfoPath -Mode 'metadata-only'
+            Assert-Match 'no media file expected' $result.Output
+
+            Assert-PathExists (Join-Path $r.Video.MetaDir 'manifest.json') `
+                'a no-media run must still write the full per-video folder'
+            Assert-PathExists (Join-Path $r.Video.MetaDir 'checksums.sha256')
+
+            # The path derivation is the subtle half: the trigger sits in
+            # "Video metadata/" rather than "Final files/", and both are
+            # exactly two levels below the per-video folder. A derivation
+            # that took the trigger's parent as "Final files" would point
+            # every later operation at the metadata folder instead.
+            $manifest = Get-Content (Join-Path $r.Video.MetaDir 'manifest.json') -Raw | ConvertFrom-Json
+            Assert-Equal 'metadata-only' $manifest.download_mode
+            Assert-Equal $r.Video.VideoId $manifest.video_id `
+                'the video folder must still be resolved correctly from a metadata trigger'
+        } finally { Remove-TestRoot $r }
+    }
+
+    It 'starts exactly one pass in a no-media mode, whatever else was moved' {
+        # --skip-download still moves the description and the subtitles, so
+        # after_move fires for those too. Only the info.json may start a
+        # pass, or a subs-only run would redo the whole folder once per
+        # subtitle language.
+        $r = New-PostprocessRoot -Label 'pp-nomedia-once' -VideoArgs @{
+            OmitVideoFile = $true; SeedChannelInfoThrottle = $true }
+        try {
+            $sub = Join-Path $r.Video.SubsDir 'Subtitles.en.vtt'
+            $result = Invoke-Postprocess -TestRoot $r -FilePath $sub -Mode 'subs-only'
+            Assert-Match 'keyed off Info\.info\.json' $result.Output
+            Assert-PathMissing (Join-Path $r.Video.MetaDir 'manifest.json') `
+                'only the info.json may trigger the pass in a no-media mode'
+        } finally { Remove-TestRoot $r }
+    }
+
 }
 
 Describe 'postprocess.ps1 comments pass' {
@@ -206,6 +293,28 @@ counts both copies.
             Assert-Match 'Post-processing complete' $result.Output
         } finally { Remove-TestRoot $r }
     }
+
+    It 'skips the comments pass entirely under --no-comments' {
+        # The comments pass is normally the longest stage of a download, so
+        # its absence has to be recorded rather than inferred from timing.
+        $r = New-PostprocessRoot -Label 'pp-nocomments' -VideoArgs @{ SeedChannelInfoThrottle = $true }
+        try {
+            $result = Invoke-Postprocess -TestRoot $r -FilePath $r.Video.MkvPath -NoComments
+            Assert-Match 'Comments pass skipped' $result.Output
+
+            Assert-Equal 0 @(Get-StubCalls -TestRoot $r -Name 'yt-dlp' |
+                             Where-Object { $_.args -contains '--write-comments' }).Count `
+                'the comments fetch must not run at all'
+
+            # 'skipped_by_request' is what distinguishes "we did not fetch"
+            # from "we fetched and found none" -- without it a --no-comments
+            # run and a video with comments disabled look identical in the
+            # manifest, and only one of the two is worth re-running.
+            $manifest = Get-Content (Join-Path $r.Video.MetaDir 'manifest.json') -Raw | ConvertFrom-Json
+            Assert-Equal 'skipped_by_request' $manifest.comment_audit.api_status
+        } finally { Remove-TestRoot $r }
+    }
+
 }
 
 Describe 'postprocess.ps1 outputs' {
@@ -472,4 +581,61 @@ throws "Could not find item" on a path Test-Path just confirmed exists.
                 'the data root must come from the file path, not from $installRoot'
         } finally { Remove-TestRoot $r }
     }
+
+    It 'records the archive layout version, the mode, and the media file' {
+        # config_file_version alone stopped being a sufficient record of
+        # what produced a video the moment a run could override the conf.
+        $r = New-PostprocessRoot -Label 'pp-manifest-v2' -VideoArgs @{ SeedChannelInfoThrottle = $true }
+        try {
+            $null = Invoke-Postprocess -TestRoot $r -FilePath $r.Video.MkvPath -Mode 'full' `
+                -RunSettings @{ mode = 'full'; quality = '1080'; codec = 'avc1' }
+            $manifest = Get-Content (Join-Path $r.Video.MetaDir 'manifest.json') -Raw | ConvertFrom-Json
+
+            $constant = [int]((Select-String -Path (Join-Path $r.InstallRoot 'scripts/postprocess.ps1') `
+                        -Pattern '^\$ArchiveLayoutVersion\s*=\s*(\d+)').Matches[0].Groups[1].Value)
+            Assert-Equal $constant $manifest.archive_layout_version `
+                'the manifest must record the layout version the script actually declares'
+            Assert-Equal 2 $constant 'the --mode work is archive layout 2'
+
+            Assert-Equal 'full' $manifest.download_mode
+            Assert-Equal 'Final files/Final Video.mkv' $manifest.media_file `
+                'media_file spares every consumer from globbing for the media file'
+            Assert-Equal '1080' $manifest.run_settings.quality `
+                'the per-run overrides must be recorded alongside config_file_version'
+        } finally { Remove-TestRoot $r }
+    }
+
+    It 'records a null media_file rather than omitting it when there is no media' {
+        # A consumer must be able to tell "this mode downloaded no media"
+        # from "this field is missing because the writer is older".
+        $r = New-PostprocessRoot -Label 'pp-manifest-nomedia' -VideoArgs @{
+            OmitVideoFile = $true; SeedChannelInfoThrottle = $true }
+        try {
+            $null = Invoke-Postprocess -TestRoot $r -FilePath $r.Video.InfoPath -Mode 'comments-only'
+            $manifest = Get-Content (Join-Path $r.Video.MetaDir 'manifest.json') -Raw | ConvertFrom-Json
+            Assert-True ($manifest.PSObject.Properties.Name -contains 'media_file') `
+                'the field must be present even when there is no media'
+            Assert-True ($null -eq $manifest.media_file)
+            Assert-Equal 'comments-only' $manifest.download_mode
+        } finally { Remove-TestRoot $r }
+    }
+
+    It 'keeps a media-less run out of the Final Video repository' {
+        # "Point a media player at this folder" is the entire contract of
+        # that tree, and a zero-byte or placeholder entry would break it
+        # more thoroughly than a missing one.
+        $r = New-PostprocessRoot -Label 'pp-nomedia-sync' -VideoArgs @{
+            OmitVideoFile = $true; SeedChannelInfoThrottle = $true }
+        try {
+            $result = Invoke-Postprocess -TestRoot $r -FilePath $r.Video.InfoPath -Mode 'metadata-only'
+            Assert-Match 'no media file to sync' $result.Output
+            $repoDir = Join-Path $r.Video.VideosRoot "Final Video/$($r.Video.Uploader)"
+            if (Test-Path $repoDir) {
+                $media = @(Get-ChildItem -Path $repoDir -File |
+                           Where-Object { $_.Extension -notin @('.json') })
+                Assert-Equal 0 $media.Count 'no media file may appear in the Final Video repository'
+            }
+        } finally { Remove-TestRoot $r }
+    }
+
 }

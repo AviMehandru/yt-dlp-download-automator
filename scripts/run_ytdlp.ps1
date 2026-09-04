@@ -107,7 +107,82 @@ param(
     # below (downloads withheld from archive.txt), because what that
     # handling protects against is "this run may not be full quality",
     # which is equally true whether the provider is broken or skipped.
-    [Parameter(Mandatory = $false)][switch]$NoPot
+    [Parameter(Mandatory = $false)][switch]$NoPot,
+
+    # --- What to download ---
+    # These are the only parameters here that change what ends up in the
+    # archive rather than how the session is scheduled, and every one of
+    # them becomes a yt-dlp argument appended AFTER --config-location.
+    # That ordering is the whole mechanism: yt-dlp resolves options
+    # left-to-right and the later one wins, which is why these can
+    # override config/yt-dlp.conf without that file being rewritten,
+    # regenerated, or touched at any point. It is the same mechanism
+    # --download-archive, --paths, --exec and --js-runtimes already use.
+    #
+    # The [ValidateSet]s below are a second line of defence, not the first:
+    # ytdl.ps1 checks the same four lists at the point the user typed them
+    # so the error names the option they wrote. 030-config asserts the two
+    # copies agree.
+
+    # full         video+audio merged (the pre-existing behaviour, exactly).
+    # video-only   -f bv*   -- no audio stream.
+    # audio-only   -f ba/b  -- no video stream. The media file is named
+    #              "Final Audio.<ext>"; see $mediaBaseName below and
+    #              docs/archive-layout.md for why that rename is an archive
+    #              layout bump.
+    # metadata-only / comments-only / subs-only
+    #              --skip-download: no media at all. postprocess.ps1 still
+    #              runs and still writes the full per-video folder, keyed
+    #              off the info.json instead of the media file.
+    [Parameter(Mandatory = $false)]
+    [ValidateSet("full", "video-only", "audio-only", "metadata-only", "comments-only", "subs-only")]
+    [string]$Mode = "full",
+
+    # Height cap in pixels, or "best" for none. Applied as a format
+    # FILTER ([height<=N]) with an unfiltered fallback after it, so a video
+    # whose only rendition is taller than the cap still downloads rather
+    # than failing the run -- an archive that skips a video is worse than
+    # one that stores it larger than asked.
+    [Parameter(Mandatory = $false)][string]$Quality = "best",
+
+    # Video codec PREFERENCE, expressed through --format-sort, not through
+    # a format filter. A filter ("only avc1") makes a video that offers no
+    # avc1 rendition fail; a sort preference reorders the candidates and
+    # still takes the best available when the preferred codec is absent.
+    [Parameter(Mandatory = $false)][ValidateSet("any", "avc1", "vp9", "av01")][string]$Codec = "any",
+
+    # Audio codec for -Mode audio-only. "any" keeps yt-dlp's chosen stream
+    # byte-for-byte; anything else runs yt-dlp's audio-extraction
+    # postprocessor, which RE-ENCODES (flac excepted, where the source is
+    # already lossy so the conversion is lossless-of-a-lossy-original and
+    # simply larger). Left at "any" the archive keeps the original bytes,
+    # which is what the rest of this pipeline optimises for.
+    [Parameter(Mandatory = $false)][ValidateSet("any", "opus", "aac", "mp3", "flac")][string]$AudioCodec = "any",
+
+    # Merge container. Only has an effect when a merge actually happens
+    # (video + audio); a single-stream download keeps its native extension
+    # regardless. See docs/archive-layout.md: consumers must find the media
+    # file by base NAME, never by extension, precisely because of this.
+    [Parameter(Mandatory = $false)][ValidateSet("mkv", "mp4", "webm")][string]$Container = "",
+
+    # --- Component skips ---
+    # Each of these turns OFF something config/yt-dlp.conf turns on. Note
+    # that "off" here means passing yt-dlp's explicit negating flag
+    # (--no-write-subs, not the absence of --write-subs): the conf has
+    # already said yes by the time these are appended, and only the
+    # negation can override it. Omitting the flag would leave the conf's
+    # setting in force, which is the single easiest mistake to make in this
+    # whole file.
+    [Parameter(Mandatory = $false)][switch]$NoComments,
+    [Parameter(Mandatory = $false)][switch]$NoSubs,
+    [Parameter(Mandatory = $false)][switch]$NoThumbnail,
+    [Parameter(Mandatory = $false)][switch]$NoMetadata,
+
+    # Base64-encoded JSON array of raw yt-dlp arguments, decoded below.
+    # Encoded rather than passed as a [string[]] because `pwsh -File`
+    # cannot bind an array at all -- see the long note at the bottom of
+    # ytdl.ps1, where both failing spellings are recorded.
+    [Parameter(Mandatory = $false)][string]$YtdlpArgsB64 = ""
 )
 
 # On PowerShell 7.3+, native-command stderr lines get wrapped as ErrorRecord
@@ -476,6 +551,20 @@ if ($needsDependencyCheck) {
 if (Test-Path $archiveFile)    { Copy-Item $archiveFile (Join-Path $historyDir "archive_$timestamp.txt") }
 if (Test-Path $globalManifest) { Copy-Item $globalManifest (Join-Path $historyDir "global_manifest_$timestamp.json") }
 
+# The conf itself, snapshotted once per session alongside them.
+#
+# Every manifest.json records config_file_version, but a version number is
+# only a useful record while the file it names is still recoverable. This
+# keeps the actual text: "CONFIG_VERSION 25 plus these three overrides"
+# stays readable years later without needing this repository, and without
+# duplicating eighty lines of conf into every video folder forever. Once
+# per session, not once per video, is the whole point of putting it here.
+#
+# Archive Logs/ is deliberately outside the consumer contract (see
+# docs/archive-layout.md), so adding a file here needs no layout bump and
+# no reader has to learn about it.
+if (Test-Path $confFile) { Copy-Item $confFile (Join-Path $historyDir "yt-dlp_conf_$timestamp.conf") }
+
 $configVersion = $null
 if (Test-Path $confFile) {
     $m = Select-String -Path $confFile -Pattern "CONFIG_VERSION:\s*(\S+)" | Select-Object -First 1
@@ -609,6 +698,269 @@ if ($potDegraded) {
         Tee-Object -FilePath $logFile -Append
 }
 
+# =====================================================================
+# CONTENT SELECTION -- what this session downloads
+# =====================================================================
+# Everything in this block becomes yt-dlp arguments appended AFTER
+# --config-location in both invocations below. yt-dlp resolves options
+# left to right and the later occurrence wins, so these override
+# config/yt-dlp.conf without that file being read differently, rewritten,
+# or regenerated -- the conf stays exactly as static as it has always
+# been. That is the entire mechanism, and it is the same one
+# --download-archive/--paths/--exec have used since CONFIG_VERSION 21.
+#
+# $contentArgs is built once here and splatted into BOTH the single-stream
+# call and the parallel worker call. Getting that wrong in one direction
+# is the specific bug this layout is arranged to prevent: $playlistArgs
+# below is deliberately single-stream-only (its options are applied at
+# ENUMERATION time in the parallel path instead), and an earlier draft of
+# this change followed that shape by accident, which would have made every
+# content option silently do nothing whenever --workers was above 1.
+# 040-run-ytdlp asserts both call sites carry $contentArgs.
+
+# --- The passthrough denylist ---
+# These are the yt-dlp options that decide WHERE output lands and WHAT
+# runs afterwards. Every one of them is already set by this script from
+# resolved runtime paths, and overriding any of them from the command line
+# does not produce a differently-configured archive -- it produces files
+# that no consumer of this archive can find, with no error at any layer,
+# which is exactly the failure docs/archive-layout.md exists to prevent.
+# Refused loudly here instead.
+$BlockedPassthroughArgs = @(
+    "-o", "--output", "-P", "--paths", "--exec", "--config-location",
+    "--ignore-config", "--download-archive", "--paths-temp"
+)
+
+$passthroughArgs = @()
+if ($YtdlpArgsB64) {
+    try {
+        $decodedJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($YtdlpArgsB64))
+        # @() around the ConvertFrom-Json result is load-bearing for the
+        # same reason it is around the if-expression in ytdl.ps1: a
+        # single-element JSON array deserializes to a bare scalar, which
+        # would make .Count 1 by accident of string length rather than by
+        # element count, and the foreach below iterate characters.
+        $passthroughArgs = @($decodedJson | ConvertFrom-Json)
+    } catch {
+        "ERROR: Could not decode -YtdlpArgsB64: $($_.Exception.Message)" | Tee-Object -FilePath $logFile -Append
+        exit 1
+    }
+    foreach ($pa in $passthroughArgs) {
+        # Compared against the bare option name only, so "--output=X" (the
+        # equals spelling optparse also accepts) is caught as well as
+        # "--output X".
+        $bare = ($pa -split '=', 2)[0]
+        if ($BlockedPassthroughArgs -contains $bare) {
+            "ERROR: --ytdlp-arg $bare is refused: it decides where files are written or what runs afterwards, and overriding it produces an archive no reader can find. See docs/archive-layout.md." |
+                Tee-Object -FilePath $logFile -Append
+            exit 1
+        }
+    }
+    if ($passthroughArgs.Count -gt 0) {
+        "  Passthrough yt-dlp arguments for this run: $($passthroughArgs -join ' ')" | Tee-Object -FilePath $logFile -Append
+    }
+}
+
+$noMediaModes = @("metadata-only", "comments-only", "subs-only")
+$isNoMedia    = $noMediaModes -contains $Mode
+
+# --- The media file's base name ---
+# "Final Video" for everything that has a video stream, "Final Audio" for
+# audio-only. This rename is why the archive layout version went to 2: a
+# layout-1 reader looks for "Final Video.*" and would find nothing in an
+# audio-only folder, showing an empty entry rather than an error.
+$mediaBaseName = if ($Mode -eq "audio-only") { "Final Audio" } else { "Final Video" }
+
+# --- Format selection ---
+# Built as a yt-dlp format expression rather than as separate flags. The
+# "/" alternatives are yt-dlp's own fallback operator: each is tried in
+# turn and the first that matches wins, which is what keeps a height cap
+# from turning "this video only exists in 1440p" into a failed download.
+$formatArgs = @()
+$heightFilter = if ($Quality -and $Quality -ne "best") { "[height<=$Quality]" } else { "" }
+switch ($Mode) {
+    "video-only" {
+        # bv* rather than bv: the * form allows a video-only rendition OR
+        # the video half of a combined stream, so a source that publishes
+        # no separate video-only track still works.
+        $formatArgs = @("-f", "bv*$heightFilter/bv*/b$heightFilter/b")
+    }
+    "audio-only" {
+        # No height filter: a height predicate against an audio-only
+        # format matches nothing, which would empty the candidate list.
+        $formatArgs = @("-f", "ba/b")
+    }
+    default {
+        if ($heightFilter) {
+            $formatArgs = @("-f", "bv*$heightFilter+ba/b$heightFilter/bv*+ba/b")
+        }
+        # No -f at all when the mode is "full" and no cap was asked for:
+        # the conf's own "-f bv*+ba/b" is already exactly right, and
+        # re-passing it would make a default run's command line differ
+        # from the pre-change one for no reason.
+    }
+}
+
+# --- Codec preference ---
+# --format-sort, not a format filter. See the -Codec parameter comment.
+# Passed with +vcodec: so it is prepended to yt-dlp's own default sort
+# order rather than replacing it -- everything else about how yt-dlp picks
+# a format stays as it was.
+$sortArgs = @()
+if ($Codec -ne "any") {
+    $sortArgs = @("-S", "vcodec:$Codec")
+}
+
+# --- Audio extraction ---
+$audioArgs = @()
+if ($Mode -eq "audio-only" -and $AudioCodec -ne "any") {
+    $audioArgs = @("-x", "--audio-format", $AudioCodec)
+}
+
+# --- Container ---
+$containerArgs = @()
+if ($Container) { $containerArgs = @("--merge-output-format", $Container) }
+
+# --- Component skips ---
+# Every entry here is an explicit NEGATING flag, never an omission. The
+# conf has already switched each of these on by the time these arguments
+# are appended, so "leave the flag out" leaves the conf's value in force
+# and the skip silently does nothing. This is the single most likely way
+# to get this file wrong; 040-run-ytdlp asserts the negations by name.
+$skipArgs = @()
+if ($NoSubs) {
+    # Both, because the conf sets both --write-subs and --write-auto-subs
+    # and each has its own negation. --embed-subs is left alone: with
+    # nothing written there is nothing to embed, and passing --no-embed-subs
+    # as well would be a no-op that only makes the command line longer.
+    $skipArgs += @("--no-write-subs", "--no-write-auto-subs")
+}
+if ($NoThumbnail) {
+    $skipArgs += @("--no-write-thumbnail", "--no-embed-thumbnail")
+}
+if ($NoMetadata) {
+    # --no-write-info-json also removes what postprocess.ps1 reads for
+    # title/id/date/urls. That is a supported state, not a broken one: it
+    # falls back to parsing the folder name, which is a path 050-postprocess
+    # already covers and archive-viewer.py already handles.
+    $skipArgs += @("--no-write-description", "--no-write-info-json")
+}
+
+# --- No-media modes ---
+# --skip-download leaves nothing to merge and nothing to move into
+# "Final files", so the after_move hook never fires for a media file.
+# postprocess.ps1 is keyed off the info.json in those modes instead (see
+# -Mode there), which means the info.json must be written even when
+# --no-metadata asked for no sidecars -- otherwise the hook has no trigger
+# at all and the per-video folder is never assembled. Forced back on here,
+# with a warning, rather than silently producing nothing.
+$skipDownloadArgs = @()
+if ($isNoMedia) {
+    $skipDownloadArgs = @("--skip-download")
+    if ($NoMetadata) {
+        "  NOTE: --mode $Mode needs the info.json as its post-processing trigger, so --no-metadata's --no-write-info-json is not applied this run (the description sidecar is still skipped)." |
+            Tee-Object -FilePath $logFile -Append
+        $skipArgs = @($skipArgs | Where-Object { $_ -ne "--no-write-info-json" })
+    }
+    if ($Mode -eq "subs-only") {
+        # Re-assert the conf's subtitle settings positively: subs-only is
+        # the one mode where a subtitle download is the entire point, so
+        # it should not depend on the conf still happening to enable them.
+        $skipDownloadArgs += @("--write-subs", "--write-auto-subs")
+    }
+}
+
+# --- The output template for audio-only ---
+# Read out of the conf and rewritten, rather than duplicated here. The
+# per-video folder shape (uploader/date/id/title, and which subfolder each
+# file type lands in) has exactly one definition in this project and it is
+# in config/yt-dlp.conf; a second copy in this file would be a second
+# thing to keep correct, and the first symptom of them disagreeing would
+# be an audio-only download landing outside the archive entirely.
+#
+# Only the DEFAULT (unprefixed) -o line is touched -- the subtitle:,
+# thumbnail:, description:, infojson: and link: templates are keyed by
+# type and already correct for audio.
+$outputArgs = @()
+if ($Mode -eq "audio-only") {
+    $defaultTemplate = $null
+    foreach ($line in (Get-Content $confFile)) {
+        if ($line -match '^\s*-o\s+"([^"]+)"\s*$') {
+            $candidate = $Matches[1]
+            # A prefixed template starts with "<type>:"; the default one
+            # starts with the uploader field. Anchored on the "%(" that
+            # every template field opens with so a future type prefix
+            # containing a digit or dash is still recognised as prefixed.
+            if ($candidate -notmatch '^[A-Za-z0-9_]+:') {
+                $defaultTemplate = $candidate
+                break
+            }
+        }
+    }
+    if ($defaultTemplate -and $defaultTemplate -match 'Final Video\.%\(ext\)s') {
+        $audioTemplate = $defaultTemplate -replace 'Final Video\.%\(ext\)s', 'Final Audio.%(ext)s'
+        $outputArgs = @("-o", $audioTemplate)
+        "  Audio-only: media file will be named 'Final Audio.<ext>' (archive layout 2)." | Tee-Object -FilePath $logFile -Append
+    } else {
+        # Refused rather than guessed. Falling back to a hardcoded
+        # template here would write the audio file into a folder shape
+        # that no longer matches the one every other file in this run is
+        # using, which is worse than not running.
+        "ERROR: could not read the default -o template out of $confFile, so --mode audio-only cannot rename the media file safely. Has the template been changed? See docs/archive-layout.md." |
+            Tee-Object -FilePath $logFile -Append
+        exit 1
+    }
+}
+
+# Assembled in a fixed order -- format, sort, audio, container, skips,
+# skip-download, output template, then the user's own passthrough LAST so
+# that --ytdlp-arg genuinely wins over everything this script decided.
+$contentArgs = @()
+$contentArgs += $formatArgs
+$contentArgs += $sortArgs
+$contentArgs += $audioArgs
+$contentArgs += $containerArgs
+$contentArgs += $skipArgs
+$contentArgs += $skipDownloadArgs
+$contentArgs += $outputArgs
+$contentArgs += $passthroughArgs
+
+if ($contentArgs.Count -gt 0) {
+    "-- Content options for this session (mode: $Mode): $($contentArgs -join ' ') --" | Tee-Object -FilePath $logFile -Append
+}
+
+# Recorded into every manifest.json this session writes, so a video can be
+# traced back to the settings that produced it. config_file_version alone
+# stopped being sufficient the moment a run could override the conf --
+# see docs/archive-layout.md. Passed to postprocess.ps1 the same way
+# -LogFileName already is, base64-encoded for the array-crossing reason
+# documented in ytdl.ps1.
+$runSettings = [ordered]@{
+    mode          = $Mode
+    quality       = $Quality
+    codec         = $Codec
+    audio_codec   = $AudioCodec
+    container     = if ($Container) { $Container } else { "mkv" }
+    no_comments   = [bool]$NoComments
+    no_subs       = [bool]$NoSubs
+    no_thumbnail  = [bool]$NoThumbnail
+    no_metadata   = [bool]$NoMetadata
+    passthrough   = @($passthroughArgs)
+    effective_args = @($contentArgs)
+}
+$runSettingsB64 = [System.Convert]::ToBase64String(
+    [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -Compress -Depth 6 -InputObject $runSettings)))
+
+# The extra arguments every postprocess.ps1 invocation in this session
+# carries, beyond -FilePath and -LogFileName. Built once so the two
+# --exec strings below cannot drift apart.
+$ppExtraArgs = "-Mode `"$Mode`" -RunSettingsB64 `"$runSettingsB64`""
+if ($NoComments) { $ppExtraArgs += " -NoComments" }
+
+# =====================================================================
+# END CONTENT SELECTION
+# =====================================================================
+
 # --ignore-config (used in every yt-dlp invocation below, single-stream or
 # parallel) stops yt-dlp from also auto-loading any yt-dlp.conf it finds in
 # the current directory, the per-user config dir (~/.config/yt-dlp/ on
@@ -631,7 +983,7 @@ if ($Workers -le 1) {
     # platforms by the time anything can call this script (the launcher
     # that got here was itself started by pwsh), and hardcoding a full path
     # would mean a fourth platform-specific value to keep correct.
-    $execCmd = "after_move:pwsh -NoProfile -File `"$(Join-Path $scriptsRoot 'postprocess.ps1')`" -FilePath %(filepath)q -LogFileName `"download.log`""
+    $execCmd = "after_move:pwsh -NoProfile -File `"$(Join-Path $scriptsRoot 'postprocess.ps1')`" -FilePath %(filepath)q -LogFileName `"download.log`" $ppExtraArgs"
 
     # Built as an array, not string-interpolated into $execCmd-style text,
     # so an empty/unused option never contributes a stray blank argument to
@@ -696,6 +1048,7 @@ if ($Workers -le 1) {
         @jsRuntimeArgs `
         @potArgs `
         --exec $execCmd `
+        @contentArgs `
         @playlistArgs `
         -- `
         $Url 2>&1 | Tee-Object -Variable sessionOutput | Tee-Object -FilePath $logFile -Append
@@ -862,10 +1215,19 @@ if ($Workers -le 1) {
             $scriptsRoot   = $using:scriptsRoot
             $logsDir       = $using:logsDir
             $jsRuntimeArgs = $using:jsRuntimeArgs
+            # The content options are decided ONCE in the parent, before
+            # any worker starts, and only the finished argument array
+            # crosses the runspace boundary -- the same rule as $potArgs
+            # above, for the same reason: a worker must never re-derive a
+            # session-wide decision for itself. In particular the
+            # audio-only -o template is read out of the conf file exactly
+            # once, not once per video.
+            $contentArgs   = $using:contentArgs
+            $ppExtraArgs   = $using:ppExtraArgs
 
             $workerLogName = "download.worker-$id.log"
             $workerLogFile = Join-Path $logsDir $workerLogName
-            $workerExecCmd = "after_move:pwsh -NoProfile -File `"$(Join-Path $scriptsRoot 'postprocess.ps1')`" -FilePath %(filepath)q -LogFileName `"$workerLogName`""
+            $workerExecCmd = "after_move:pwsh -NoProfile -File `"$(Join-Path $scriptsRoot 'postprocess.ps1')`" -FilePath %(filepath)q -LogFileName `"$workerLogName`" $ppExtraArgs"
             # A worker's URL is BUILT here from an enumerated id rather than
             # typed by anyone, which makes the hyphen case more likely, not
             # less: enumeration hands back whatever ids the channel has, and
@@ -888,6 +1250,7 @@ if ($Workers -le 1) {
                 @jsRuntimeArgs `
                 @potArgs `
                 --exec $workerExecCmd `
+                @contentArgs `
                 -- `
                 $videoUrl 2>&1 | Tee-Object -Variable workerOutput | Add-Content -Path $workerLogFile
 

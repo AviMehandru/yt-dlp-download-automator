@@ -37,8 +37,32 @@ param(
     [Parameter(Mandatory = $false)][string]$PlaylistItems = "",
     [Parameter(Mandatory = $false)][string]$DateAfter = "",
     [Parameter(Mandatory = $false)][switch]$LazyPlaylist,
-    [Parameter(Mandatory = $false)][ValidateRange(1, 64)][int]$Workers = 1
+    [Parameter(Mandatory = $false)][ValidateRange(1, 64)][int]$Workers = 1,
+    [Parameter(Mandatory = $false)][ValidateRange(1024, 65535)][int]$PotPort = 4416,
+    [Parameter(Mandatory = $false)][switch]$SkipPotUpdate,
+    [Parameter(Mandatory = $false)][switch]$NoPot,
+    [Parameter(Mandatory = $false)]
+    [ValidateSet("full", "video-only", "audio-only", "metadata-only", "comments-only", "subs-only")]
+    [string]$Mode = "full",
+    [Parameter(Mandatory = $false)][string]$Quality = "best",
+    [Parameter(Mandatory = $false)][ValidateSet("any", "avc1", "vp9", "av01")][string]$Codec = "any",
+    [Parameter(Mandatory = $false)][ValidateSet("any", "opus", "aac", "mp3", "flac")][string]$AudioCodec = "any",
+    [Parameter(Mandatory = $false)][ValidateSet("mkv", "mp4", "webm")][string]$Container = "",
+    [Parameter(Mandatory = $false)][switch]$NoComments,
+    [Parameter(Mandatory = $false)][switch]$NoSubs,
+    [Parameter(Mandatory = $false)][switch]$NoThumbnail,
+    [Parameter(Mandatory = $false)][switch]$NoMetadata,
+    [Parameter(Mandatory = $false)][string]$YtdlpArgsB64 = ""
 )
+# The passthrough array is decoded here rather than captured raw, so the
+# assertion in the test reads the arguments the way run_ytdlp.ps1 will
+# actually see them -- which is the half of the base64 transport that can
+# realistically break.
+$decodedPassthrough = @()
+if ($YtdlpArgsB64) {
+    $decodedPassthrough = @([System.Text.Encoding]::UTF8.GetString(
+        [System.Convert]::FromBase64String($YtdlpArgsB64)) | ConvertFrom-Json)
+}
 [ordered]@{
     Url             = $Url
     DataRoot        = $DataRoot
@@ -47,6 +71,19 @@ param(
     DateAfter       = $DateAfter
     LazyPlaylist    = [bool]$LazyPlaylist
     Workers         = $Workers
+    PotPort         = $PotPort
+    SkipPotUpdate   = [bool]$SkipPotUpdate
+    NoPot           = [bool]$NoPot
+    Mode            = $Mode
+    Quality         = $Quality
+    Codec           = $Codec
+    AudioCodec      = $AudioCodec
+    Container       = $Container
+    NoComments      = [bool]$NoComments
+    NoSubs          = [bool]$NoSubs
+    NoThumbnail     = [bool]$NoThumbnail
+    NoMetadata      = [bool]$NoMetadata
+    Passthrough     = $decodedPassthrough
 } | ConvertTo-Json | Set-Content -LiteralPath $env:YTDL_TEST_CAPTURE
 '@
     Set-Content -LiteralPath (Join-Path $root.InstallRoot 'scripts/run_ytdlp.ps1') -Value $standIn -Encoding utf8
@@ -139,16 +176,29 @@ param(
         # restore the wrong-run behaviour above for that one option.
         $src = Get-Content -LiteralPath (Join-Path $root.InstallRoot 'scripts/ytdl.ps1') -Raw
 
+        # (?s) so the capture can span lines: $knownOptions outgrew a single
+        # line when the content options were added, and without it this
+        # match failed outright rather than matching a shorter list.
+        #
+        # The character class is [a-z-] rather than [a-z] for a subtler
+        # reason. With [a-z], every option carrying an internal hyphen was
+        # invisible to BOTH halves of this comparison -- --no-pot,
+        # --skip-pot-update and --pot-port before, and all ten content
+        # options now. The test compared the six easy ones, found them
+        # equal, and reported success while never having looked at two
+        # thirds of the list it exists to guard. Same class of quiet
+        # staleness as 070-installer's hardcoded step count: passing for a
+        # reason unrelated to the thing being asserted.
         $listed = @()
-        if ($src -match '(?m)^\$knownOptions\s*=\s*@\((.*?)\)') {
-            $listed = @([regex]::Matches($matches[1], '"(--[a-z]+)"') |
-                        ForEach-Object { $_.Groups[1].Value } | Sort-Object)
+        if ($src -match '(?sm)^\$knownOptions\s*=\s*@\((.*?)\)\s*$') {
+            $listed = @([regex]::Matches($matches[1], '"(--[a-z-]+)"') |
+                        ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
         }
         Assert-True ($listed.Count -gt 0) '$knownOptions could not be read out of ytdl.ps1'
 
         # The switch cases, read the same way: every quoted "--option" that
         # appears as a case label in the parsing loop.
-        $cases = @([regex]::Matches($src, '(?m)^\s{8}"(--[a-z]+)"\s*\{') |
+        $cases = @([regex]::Matches($src, '(?m)^\s{8}"(--[a-z-]+)"\s*\{') |
                    ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
         Assert-True ($cases.Count -gt 0) 'no switch cases could be read out of ytdl.ps1'
 
@@ -281,6 +331,118 @@ param(
             Set-Content -LiteralPath (Join-Path $root.InstallRoot 'scripts/run_ytdlp.ps1') -Value $standIn -Encoding utf8
         }
     }
+    # -----------------------------------------------------------------
+    # Content options (archive layout 2)
+    # -----------------------------------------------------------------
+    # These decide WHAT gets downloaded rather than how the session is
+    # scheduled, so unlike the playlist options above they matter on a
+    # single video URL too. The parser is still the only place the command
+    # line is read, so this is still the only place their spellings are
+    # checked.
+
+    It 'translates every content option to its run_ytdlp.ps1 parameter' {
+        $r = Invoke-Launcher -Arguments @($url,
+            '--mode', 'audio-only', '--quality', '1080',
+            '--codec', 'av01', '--audio-codec', 'opus', '--container', 'webm')
+        Assert-Equal 0 $r.ExitCode 'a fully-specified content run must start'
+        Assert-Equal 'audio-only' $r.Params.Mode
+        Assert-Equal '1080'       $r.Params.Quality
+        Assert-Equal 'av01'       $r.Params.Codec
+        Assert-Equal 'opus'       $r.Params.AudioCodec
+        Assert-Equal 'webm'       $r.Params.Container
+    }
+
+    It 'translates every component skip to its switch' {
+        $r = Invoke-Launcher -Arguments @($url,
+            '--no-comments', '--no-subs', '--no-thumbnail', '--no-metadata')
+        Assert-Equal 0 $r.ExitCode
+        Assert-True $r.Params.NoComments  '--no-comments must reach run_ytdlp.ps1'
+        Assert-True $r.Params.NoSubs      '--no-subs must reach run_ytdlp.ps1'
+        Assert-True $r.Params.NoThumbnail '--no-thumbnail must reach run_ytdlp.ps1'
+        Assert-True $r.Params.NoMetadata  '--no-metadata must reach run_ytdlp.ps1'
+    }
+
+    It 'resolves --no-audio and --no-video to the equivalent mode' {
+        $a = Invoke-Launcher -Arguments @($url, '--no-audio')
+        Assert-Equal 'video-only' $a.Params.Mode '--no-audio is an alias for --mode video-only'
+
+        $v = Invoke-Launcher -Arguments @($url, '--no-video')
+        Assert-Equal 'audio-only' $v.Params.Mode '--no-video is an alias for --mode audio-only'
+    }
+
+    It 'rejects an invalid value for an enumerated option, naming the valid ones' {
+        # Checked in the launcher rather than left to run_ytdlp.ps1's
+        # [ValidateSet] so the message names the option the user typed
+        # instead of a parameter on a script they never invoked. "av1" for
+        # "av01" is the likeliest of these by a wide margin -- the codec's
+        # marketing name has no zero in it and its format-field name does.
+        $r = Invoke-Launcher -Arguments @($url, '--codec', 'av1')
+        Assert-Equal 1 $r.ExitCode
+        Assert-Match 'av01 is spelled with a zero' $r.Output
+        Assert-True ($null -eq $r.Params) 'run_ytdlp.ps1 must not be started at all'
+
+        $m = Invoke-Launcher -Arguments @($url, '--mode', 'audio only')
+        Assert-Equal 1 $m.ExitCode
+        Assert-Match '--mode must be one of' $m.Output
+    }
+
+    It 'rejects the combinations that would silently download nothing' {
+        # Every one of these runs to completion and produces an empty or
+        # wrong result rather than an error, which is exactly the class of
+        # outcome this pipeline treats as worse than a loud failure.
+        $both = Invoke-Launcher -Arguments @($url, '--no-audio', '--no-video')
+        Assert-Equal 1 $both.ExitCode
+        Assert-Match 'leave no media to download' $both.Output
+
+        $clash = Invoke-Launcher -Arguments @($url, '--no-audio', '--mode', 'audio-only')
+        Assert-Equal 1 $clash.ExitCode
+        Assert-Match 'cannot be combined with --mode' $clash.Output
+
+        $nothing = Invoke-Launcher -Arguments @($url, '--mode', 'comments-only', '--no-comments')
+        Assert-Equal 1 $nothing.ExitCode
+        Assert-Match 'would fetch nothing at all' $nothing.Output
+    }
+
+    It 'rejects a media option against a mode that downloads no media' {
+        # "--mode comments-only --quality 1080" is a misunderstanding of
+        # what the mode does, and saying so now costs a retyped command
+        # instead of a finished run with no video in it.
+        $r = Invoke-Launcher -Arguments @($url, '--mode', 'metadata-only', '--quality', '1080')
+        Assert-Equal 1 $r.ExitCode
+        Assert-Match 'downloads no media' $r.Output
+    }
+
+    It 'round-trips --ytdlp-arg values that no delimiter could survive' {
+        # The reason the passthrough array crosses as base64 JSON rather
+        # than as a joined string: a real --match-filter expression
+        # contains commas, spaces, "&" and comparison operators, and
+        # `pwsh -File` can bind neither a repeated parameter nor comma
+        # array syntax. The stand-in decodes it the same way run_ytdlp.ps1
+        # does, so this asserts the transport end to end.
+        $filter = 'duration > 60 & title *= a,b'
+        $r = Invoke-Launcher -Arguments @($url,
+            '--ytdlp-arg', '--match-filter', '--ytdlp-arg', $filter,
+            '--ytdlp-arg', '--sponsorblock-mark', '--ytdlp-arg', 'all')
+        Assert-Equal 0 $r.ExitCode
+        $pt = @($r.Params.Passthrough)
+        Assert-Equal 4 $pt.Count 'every --ytdlp-arg value must arrive, in order'
+        Assert-Equal '--match-filter'     $pt[0]
+        Assert-Equal $filter              $pt[1] 'the filter expression must survive intact'
+        Assert-Equal '--sponsorblock-mark' $pt[2]
+        Assert-Equal 'all'                $pt[3]
+    }
+
+    It 'leaves the content parameters at their defaults when none are given' {
+        # A plain run must produce the same invocation it always did --
+        # the content options are additive, and a default run's command
+        # line should not have changed at all.
+        $r = Invoke-Launcher -Arguments @($url)
+        Assert-Equal 'full' $r.Params.Mode
+        Assert-Equal 'best' $r.Params.Quality
+        Assert-Equal 'any'  $r.Params.Codec
+        Assert-Equal ''     $r.Params.Container
+        Assert-Equal 0 @($r.Params.Passthrough).Count
+    }
 }
 
 Describe 'POSIX ytdl shim' {
@@ -311,4 +473,5 @@ Describe 'POSIX ytdl shim' {
         Assert-Match 'REACHED:https://youtu.be/abc123' $out
         Remove-TestRoot $r
     }
+
 }

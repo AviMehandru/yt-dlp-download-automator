@@ -16,7 +16,32 @@ param(
     # the lines from unrelated videos would end up interleaved into each
     # other's video_complete.log). A distinct log per concurrent worker
     # keeps that logic correct with no other changes needed.
-    [Parameter(Mandatory = $false)][string]$LogFileName = "download.log"
+    [Parameter(Mandatory = $false)][string]$LogFileName = "download.log",
+
+    # Which content mode produced this run. Defaults to "full", so a
+    # standalone invocation of this script against an existing
+    # "Final files/Final Video.mkv" behaves exactly as it always has --
+    # the documented manual-repair path in CLAUDE.md keeps working
+    # unchanged, with no new argument to remember.
+    #
+    # What this actually selects is WHICH FILE is the trigger for the run
+    # (see the gate below): the merged video, the audio file, or -- when
+    # no media is downloaded at all -- the info.json.
+    [Parameter(Mandatory = $false)]
+    [ValidateSet("full", "video-only", "audio-only", "metadata-only", "comments-only", "subs-only")]
+    [string]$Mode = "full",
+
+    # Skips the comments pass and its audit. Separate from -Mode because
+    # it is orthogonal to it: "download everything but do not spend an
+    # hour on comments" is a full-mode run.
+    [Parameter(Mandatory = $false)][switch]$NoComments,
+
+    # Base64-encoded JSON of the settings run_ytdlp.ps1 resolved for this
+    # session, recorded verbatim into manifest.json. See the
+    # run_settings field in docs/archive-layout.md for why the config
+    # file's version number stopped being a sufficient record of what
+    # produced a video.
+    [Parameter(Mandatory = $false)][string]$RunSettingsB64 = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -126,12 +151,48 @@ function Exit-Lock {
 # Adding a NEW manifest field is backward-compatible and needs no bump.
 # See docs/archive-layout.md for the full contract and for the rule a
 # consumer is expected to apply to this number.
-$ArchiveLayoutVersion = 1
+#
+# VERSION 2 (--mode): the media file is no longer always "Final Video.mkv".
+#   - audio-only runs write "Final Audio.<ext>" instead of "Final Video.<ext>"
+#   - a video's container is selectable, so the extension varies (.mkv,
+#     .mp4, .webm) even when the base name does not
+#   - metadata-only / comments-only / subs-only runs write a complete
+#     per-video folder with NO media file in it at all
+#
+# The rename is what forces the bump: a layout-1 reader looks for
+# "Final Video.*", finds nothing in an audio-only folder, and shows an
+# empty entry rather than an error -- exactly the silent failure this
+# number exists to convert into a loud one. The rule for a version-2
+# reader is: find the media file by BASE NAME ("Final Video" or
+# "Final Audio"), never by extension, and treat its absence as a valid
+# state rather than a corrupt folder. manifest.json's media_file field
+# gives it to you directly and should be preferred over globbing.
+$ArchiveLayoutVersion = 2
+
+$noMediaModes = @("metadata-only", "comments-only", "subs-only")
+$isNoMedia    = $noMediaModes -contains $Mode
+# "Final Video" for anything carrying a video stream, "Final Audio" for
+# audio-only. Must agree with $mediaBaseName in run_ytdlp.ps1, which is
+# what actually names the file via the -o template; 050-postprocess
+# asserts the two agree.
+$mediaBaseName = if ($Mode -eq "audio-only") { "Final Audio" } else { "Final Video" }
 
 try {
-    # FilePath = .../<Uploader> - <Date> - <Id> - <Title>/Final files/<name>.mkv
-    $finalFilesDir = Split-Path $FilePath -Parent
-    $videoDir      = Split-Path $finalFilesDir -Parent
+    # The trigger file differs by mode, but its DEPTH does not, which is
+    # what lets one derivation serve both:
+    #
+    #   media run:    .../<Uploader> - <Date> - <Id> - <Title>/Final files/Final Video.mkv
+    #   no-media run: .../<Uploader> - <Date> - <Id> - <Title>/Video metadata/Info.info.json
+    #
+    # Both sit exactly two levels below the per-video folder, so $videoDir
+    # is the trigger's grandparent either way. $finalFilesDir is then
+    # composed from $videoDir rather than taken from the trigger's parent
+    # -- in a no-media run the trigger's parent is "Video metadata", and
+    # deriving it the old way would have pointed every later "Final files"
+    # operation at the metadata folder instead.
+    $triggerDir    = Split-Path $FilePath -Parent
+    $videoDir      = Split-Path $triggerDir -Parent
+    $finalFilesDir = Join-Path $videoDir "Final files"
     $channelDir    = Split-Path $videoDir -Parent
     $archiveDir    = Split-Path $channelDir -Parent          # .../Complete Archive
     $youtubeRoot   = Split-Path $archiveDir -Parent          # .../Youtube Videos
@@ -181,9 +242,38 @@ try {
     # the real thing: whichever invocation ran last won. Only the final
     # merged .mkv should ever reach any of this, so every other file this
     # script gets invoked with is now skipped outright.
-    if ($FilePath -notmatch '\.mkv$') {
-        Log "Skipped: not the final merged .mkv (this is a --keep-video pre-merge stream, e.g. the video-only or audio-only file). No further processing done for this invocation."
-        return
+    # The gate is on the file's ROLE -- its base name -- not on its
+    # extension. Extension was a sufficient test only while every run
+    # produced exactly one kind of output; with a selectable container the
+    # final file can legitimately be .mkv, .mp4 or .webm, with audio-only
+    # it can be .m4a/.opus/.webm/.mp3/.flac, and with a no-media mode
+    # there is no media file to key on at all. Testing "is this the file
+    # this mode calls final" instead holds across all of those.
+    #
+    # The "[^.]+$" tail is what still excludes --keep-video's pre-merge
+    # streams: those carry yt-dlp's format-id as an extra dotted segment
+    # ("Final Video.f137.mp4"), so anything with a second dot after the
+    # base name is a raw stream, not the final file.
+    $triggerName = Split-Path $FilePath -Leaf
+    if ($isNoMedia) {
+        # No media is downloaded, so after_move never fires for a media
+        # file. The info.json is the trigger instead -- it is written in
+        # every no-media mode (run_ytdlp.ps1 forces it back on even under
+        # --no-metadata precisely so this hook has something to fire on),
+        # and it is written exactly once per video, which is what makes it
+        # a safe single trigger. Subtitles and the description also get
+        # moved in these modes and must NOT each start a second pass.
+        if ($triggerName -notmatch '^Info\.info\.json$') {
+            Log "Skipped: --mode $Mode is keyed off Info.info.json, and this invocation was for '$triggerName'. No further processing done for this invocation."
+            return
+        }
+        Log "Mode '$Mode': no media file expected. Assembling the per-video folder from the metadata alone."
+    } else {
+        $mediaPattern = "^{0}\.[^.]+$" -f [regex]::Escape($mediaBaseName)
+        if ($triggerName -notmatch $mediaPattern) {
+            Log "Skipped: '$triggerName' is not this run's final media file ('$mediaBaseName.<ext>'). This is a --keep-video pre-merge stream or a sidecar. No further processing done for this invocation."
+            return
+        }
     }
 
     # --- Relocate --keep-video's pre-merge streams for clarity ---
@@ -203,16 +293,27 @@ try {
     # only ever holds the actual final output (Final Video.mkv, Link.*),
     # with the raw pre-merge streams treated as their own category
     # entirely, the same way subtitles or thumbnails are.
+    # $mediaFilePath is the one variable the rest of this script should use
+    # to mean "the finished media file", and it is deliberately NOT the
+    # same thing as $FilePath any more: in a no-media mode $FilePath is the
+    # info.json that triggered this run, and there is no media file at all.
+    # Every step below that touches media is guarded on this being non-null
+    # rather than on $FilePath's extension.
+    $mediaFilePath = if ($isNoMedia) { $null } else { $FilePath }
+
     try {
-        $preMergeFiles = Get-ChildItem -Path $finalFilesDir -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -ne $FilePath -and $_.Name -match '^Final Video\.f\S+\.' }
+        $preMergePattern = "^{0}\.f\S+\." -f [regex]::Escape($mediaBaseName)
+        $preMergeFiles = if ($isNoMedia) { @() } else {
+            Get-ChildItem -Path $finalFilesDir -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -ne $mediaFilePath -and $_.Name -match $preMergePattern }
+        }
         if ($preMergeFiles) {
             $preMergeDir = Join-Path $videoDir "Pre-merge streams"
             if (!(Test-Path $preMergeDir)) { New-Item -ItemType Directory -Path $preMergeDir -Force | Out-Null }
             foreach ($f in $preMergeFiles) {
                 Move-Item -Path $f.FullName -Destination (Join-Path $preMergeDir $f.Name) -Force
             }
-            Log "Moved $($preMergeFiles.Count) --keep-video pre-merge stream(s) into 'Pre-merge streams/' (sibling of 'Final files/') -- Final Video.mkv is the only file remaining in Final files."
+            Log "Moved $($preMergeFiles.Count) --keep-video pre-merge stream(s) into 'Pre-merge streams/' (sibling of 'Final files/') -- $(Split-Path $mediaFilePath -Leaf) is the only file remaining in Final files."
         }
     } catch {
         Log "WARNING: Could not relocate --keep-video pre-merge streams: $($_.Exception.Message)"
@@ -378,7 +479,16 @@ try {
     # doesn't make the video finish any faster overall, it just makes sure
     # everything expiry-sensitive is safe before comments are attempted.
     try {
-        if ($originalUrl -and $infoJsonFile) {
+        if ($NoComments) {
+            # Logged rather than silently skipped: the comments pass is
+            # normally the longest single stage of a download, so its
+            # absence is the most conspicuous difference in a run's timing
+            # and the log should say why rather than leave it to be
+            # inferred. comment_audit below records the same fact in the
+            # manifest, so a consumer can tell "no comments were fetched"
+            # apart from "this video has no comments".
+            Log "Comments pass skipped: --no-comments was given for this run."
+        } elseif ($originalUrl -and $infoJsonFile) {
             $commentsTempDir = Join-Path $videoMetaDir "_comments_temp"
             if (!(Test-Path $commentsTempDir)) { New-Item -ItemType Directory -Path $commentsTempDir -Force | Out-Null }
 
@@ -552,7 +662,11 @@ try {
         merged_count      = $null
         yt_dlp_reported   = $null
         api_comment_count = $null
-        api_status        = 'not_attempted'
+        # 'skipped_by_request' distinguishes "we did not fetch comments"
+        # from "we fetched and found none" -- without it, a --no-comments
+        # run and a video with the comments disabled are indistinguishable
+        # in the manifest, and only one of the two is worth re-running.
+        api_status        = if ($NoComments) { 'skipped_by_request' } else { 'not_attempted' }
         shortfall_ratio   = $null
         tolerance         = $null
         duplicate_ids     = $null
@@ -620,8 +734,16 @@ try {
         }
 
         # --- API cross-check: exactly 1 quota unit per video ---
+        # Not attempted at all under --no-comments. The cross-check exists
+        # to answer "did the fetch miss any comments"; with no fetch there
+        # is nothing to compare, and spending a quota unit to discover
+        # that the archive holds 0 of N comments would be a warning about
+        # a deliberate choice. The local invariants above still ran, and
+        # correctly report 0 merged with no orphans.
         $apiKey = $env:YTDLP_YOUTUBE_API_KEY
-        if ([string]::IsNullOrWhiteSpace($apiKey)) {
+        if ($NoComments) {
+            Log "Comment audit: API cross-check skipped -- no comments were fetched this run (--no-comments)."
+        } elseif ([string]::IsNullOrWhiteSpace($apiKey)) {
             $commentAudit.api_status = 'no_key'
             Log "Comment audit: local checks only (set YTDLP_YOUTUBE_API_KEY to enable the API cross-check)."
         } elseif (-not $videoId) {
@@ -691,15 +813,24 @@ try {
     # preserves whatever's already attached (e.g. the embedded thumbnail).
     # Writes to a temp file first and only swaps it in on success, so a
     # failed remux can never leave you with a damaged or missing video.
+    # Still .mkv-only, and deliberately so: Matroska is the only container
+    # in the selectable set that carries arbitrary file attachments.
+    # MP4 has no general attachment concept ffmpeg can write this way, and
+    # WebM's spec omits the attachment elements Matroska defines. So
+    # --container mp4/webm and every audio-only format keep the comments
+    # in the sidecar info.json only, which is where the comment-complete
+    # copy lives in every case anyway -- the embed is a convenience, not
+    # the system of record. Logged explicitly below so the difference
+    # between containers is visible in the log rather than surprising.
     try {
-        if ($FilePath -match '\.mkv$' -and $infoJsonFile) {
+        if ($mediaFilePath -and $mediaFilePath -match '\.mkv$' -and $infoJsonFile) {
             # Count existing attachment-type streams so the mimetype tag
             # below targets ONLY the new one we're adding. Without an
             # explicit index, ffmpeg's "s:t" specifier matches every
             # attachment stream, which would mislabel the already-embedded
             # thumbnail as application/json too.
             $existingAttachCount = 0
-            $probeOutput = & ffprobe -v error -select_streams t -show_entries stream=index -of csv=p=0 $FilePath 2>&1
+            $probeOutput = & ffprobe -v error -select_streams t -show_entries stream=index -of csv=p=0 $mediaFilePath 2>&1
             if ($LASTEXITCODE -eq 0) {
                 $existingAttachCount = @($probeOutput | Where-Object { $_ -match '^\d+$' }).Count
             } else {
@@ -712,21 +843,23 @@ try {
             # fast, but on a very large file or a slow disk there's no
             # reason to let output sit buffered instead of showing up as
             # it happens.
-            $ffmpegOutput = & ffmpeg -y -i $FilePath -attach $infoJsonFile.FullName -metadata:s:t:$existingAttachCount "mimetype=application/json" -map 0 -c copy $remuxTemp 2>&1 | ForEach-Object {
+            $ffmpegOutput = & ffmpeg -y -i $mediaFilePath -attach $infoJsonFile.FullName -metadata:s:t:$existingAttachCount "mimetype=application/json" -map 0 -c copy $remuxTemp 2>&1 | ForEach-Object {
                 Log "  [ffmpeg-reembed] $_"
                 $_
             }
 
             if ((Test-Path $remuxTemp) -and (Get-Item $remuxTemp).Length -gt 0) {
-                Remove-Item -Path $FilePath -Force
-                Move-Item -Path $remuxTemp -Destination $FilePath -Force
-                Log "Re-embedded comment-complete info.json into $FilePath."
+                Remove-Item -Path $mediaFilePath -Force
+                Move-Item -Path $remuxTemp -Destination $mediaFilePath -Force
+                Log "Re-embedded comment-complete info.json into $mediaFilePath."
             } else {
                 Log "WARNING: Re-embed produced no output file -- original left untouched. Comments are still in the sidecar info.json, just not embedded in the .mkv."
                 Remove-Item -Path $remuxTemp -Force -ErrorAction SilentlyContinue
             }
-        } elseif ($FilePath -notmatch '\.mkv$') {
-            Log "Skipped info.json re-embed: output file isn't .mkv ($FilePath)."
+        } elseif (-not $mediaFilePath) {
+            Log "Skipped info.json re-embed: --mode $Mode downloaded no media file to embed into. The comment-complete info.json is in Video metadata/ as usual."
+        } elseif ($mediaFilePath -notmatch '\.mkv$') {
+            Log "Skipped info.json re-embed: only Matroska carries file attachments, and this run produced $(Split-Path $mediaFilePath -Leaf). The comment-complete info.json is in Video metadata/ as usual."
         }
     } catch {
         Log "WARNING: Re-embed of info.json failed: $($_.Exception.Message). Original file left untouched; comments are still in the sidecar info.json."
@@ -805,6 +938,32 @@ try {
     # more than picking the portable API in the first place.
     $osCaption     = $PSVersionTable.OS
 
+    # --- The settings this run actually used ---
+    # config_file_version alone stopped being a sufficient record of what
+    # produced a video the moment a run could override the conf from the
+    # command line. It is still recorded (and still means what it always
+    # did -- which generation of the static baseline was installed), but a
+    # consumer now needs the overrides on top of it to know what it is
+    # looking at. Decoded defensively: a manifest missing this field is a
+    # far better outcome than a video that fails to get a manifest at all.
+    $runSettings = $null
+    if ($RunSettingsB64) {
+        try {
+            $runSettings = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($RunSettingsB64)) | ConvertFrom-Json
+        } catch {
+            Log "WARNING: could not decode -RunSettingsB64; manifest run_settings will be null: $($_.Exception.Message)"
+        }
+    }
+
+    # The media file's archive-relative path, or $null when the mode
+    # downloaded none. Handed to consumers directly so they never have to
+    # guess at the base name or glob for an extension -- which is the
+    # whole reason the layout version went to 2. Computed from $videoDir
+    # so it is in the same "/"-separated form as every_filename.
+    $mediaFileRel = if ($mediaFilePath -and (Test-Path $mediaFilePath)) {
+        $mediaFilePath.Substring($videoDir.Length + 1).Replace([System.IO.Path]::DirectorySeparatorChar, '/')
+    } else { $null }
+
     # --- manifest.json (#8) ---
     $manifest = [ordered]@{
         # First field on purpose: a consumer that cannot understand this
@@ -816,6 +975,14 @@ try {
         ffmpeg_version          = $ffmpegVersion
         operating_system        = $osCaption
         config_file_version     = $configVersion
+        # New in layout 2. download_mode says which of the six modes wrote
+        # this folder; media_file names the media file (or is null, which
+        # is a VALID state under layout 2, not a corrupt folder);
+        # run_settings carries the per-run overrides that config_file_version
+        # can no longer imply on its own.
+        download_mode           = $Mode
+        media_file              = $mediaFileRel
+        run_settings            = $runSettings
         video_id                = $videoId
         title                   = $title
         uploader                = $uploader
@@ -980,13 +1147,29 @@ try {
                 New-Item -ItemType Directory -Path $finalVideoChannelDir -Force | Out-Null
             }
 
-            # Full descriptive filename, built from the already-sanitized
-            # folder name rather than reconstructed from raw (unsanitized)
-            # info.json fields -- the folder name has already been through
-            # yt-dlp's own filename sanitization, so reusing it avoids
-            # re-doing (and potentially mismatching) that logic here.
-            $finalVideoFileName = (Split-Path $videoDir -Leaf) + [System.IO.Path]::GetExtension($FilePath)
-            Copy-Item -Path $FilePath -Destination (Join-Path $finalVideoChannelDir $finalVideoFileName) -Force
+            # The media copy is skipped, not faked, when the mode produced
+            # no media. The manifest and Channel Info syncs below still run:
+            # this repository is also where a media player finds the
+            # channel's assets, and a metadata-only run legitimately
+            # updates those. What must NOT happen is an empty or
+            # placeholder file appearing here -- "point a media player at
+            # this folder" is the entire contract of this tree, and a
+            # zero-byte entry would break it more thoroughly than a missing
+            # one.
+            if ($mediaFilePath -and (Test-Path $mediaFilePath)) {
+                # Full descriptive filename, built from the already-sanitized
+                # folder name rather than reconstructed from raw (unsanitized)
+                # info.json fields -- the folder name has already been through
+                # yt-dlp's own filename sanitization, so reusing it avoids
+                # re-doing (and potentially mismatching) that logic here.
+                # The extension comes off the actual media file, so a
+                # --container mp4 run or an audio-only .opus lands here with
+                # the right one rather than an assumed .mkv.
+                $finalVideoFileName = (Split-Path $videoDir -Leaf) + [System.IO.Path]::GetExtension($mediaFilePath)
+                Copy-Item -Path $mediaFilePath -Destination (Join-Path $finalVideoChannelDir $finalVideoFileName) -Force
+            } else {
+                Log "Final Video repository: no media file to sync for --mode $Mode; channel manifest and Channel Info still refreshed."
+            }
 
             if (Test-Path $channelManifestPath) {
                 Copy-Item -Path $channelManifestPath -Destination (Join-Path $finalVideoChannelDir "channel_manifest.json") -Force
