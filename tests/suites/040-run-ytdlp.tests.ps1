@@ -133,8 +133,28 @@ Describe 'run_ytdlp.ps1 session orchestration' {
             # at the default root would archive into the wrong place.
             $archiveIdx = [Array]::IndexOf($argv, '--download-archive')
             Assert-True ($archiveIdx -ge 0) '--download-archive must be passed on the command line'
-            Assert-Equal (Join-Path $r.DataRoot 'Archive Logs/Logs/archive.txt') $argv[$archiveIdx + 1] `
+
+            # What this assertion is FOR is that the archive file follows
+            # -DataRoot. It used to demand the literal 'archive.txt', which
+            # quietly became wrong when PO token support landed: a session
+            # that cannot bring the provider up runs degraded on purpose and
+            # points --download-archive at
+            # '.archive-degraded-<timestamp>.txt' instead, so the ids it
+            # fetches are withheld from the real archive and can be
+            # re-fetched later. A test box has no provider, so every run here
+            # takes that path -- the test was asserting an environment it
+            # never actually has.
+            #
+            # So: assert the DIRECTORY (the -DataRoot invariant, which is the
+            # point) and that the filename is one of the two legitimate
+            # forms, rather than encoding which mode the session happened to
+            # choose.
+            $archivePath = $argv[$archiveIdx + 1]
+            $expectedDir = Join-Path $r.DataRoot 'Archive Logs/Logs'
+            Assert-Equal $expectedDir (Split-Path $archivePath -Parent) `
                 'the download archive must live under the data root actually in use'
+            Assert-Match '^(archive\.txt|\.archive-degraded-[\d_-]+\.txt)$' (Split-Path $archivePath -Leaf) `
+                'the archive file must be either the real archive.txt or a degraded-session archive'
 
             Assert-Match '--paths home:' $download.line
             Assert-Match ([regex]::Escape((Join-Path $r.DataRoot 'Youtube Videos/Complete Archive'))) $download.line

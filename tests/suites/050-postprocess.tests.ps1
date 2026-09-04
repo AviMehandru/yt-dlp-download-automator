@@ -292,9 +292,33 @@ recorded hash is stale before the script exits.
             Assert-Equal 'Test Channel' $manifest.uploader `
                 'the uploader comes from the CHANNEL FOLDER name, not from info.json'
             Assert-Equal '20250101'     $manifest.upload_date
-            Assert-Equal '24'           "$($manifest.config_file_version)" `
+            # Read out of the config rather than written here as a literal.
+            # This was a hardcoded '24' and had been failing since the config
+            # moved to 25 -- the same stale-literal bug the installer suite
+            # carried, and the same fix: assert the RELATIONSHIP (the manifest
+            # records whatever the installed config says) rather than today's
+            # value of it.
+            $installedConf = Join-Path $r.InstallRoot 'configs/yt-dlp.conf'
+            $expectedConfigVersion = [regex]::Match(
+                (Get-Content -LiteralPath $installedConf -Raw),
+                '(?m)^#\s*CONFIG_VERSION:\s*(\d+)').Groups[1].Value
+            Assert-True ($expectedConfigVersion -ne '') `
+                'could not read CONFIG_VERSION out of the installed yt-dlp.conf'
+            Assert-Equal $expectedConfigVersion "$($manifest.config_file_version)" `
                 'the config version must be read from the INSTALLED configs/yt-dlp.conf'
             Assert-True ($null -ne $manifest.operating_system) 'the OS should be recorded'
+
+            # The layout contract (docs/archive-layout.md). Consumers outside
+            # this repo key off this number to decide whether they can read
+            # the archive at all, so it must be present and must agree with
+            # the constant postprocess.ps1 declares.
+            $declaredLayout = [regex]::Match(
+                (Get-Content -LiteralPath (Join-Path $script:RepoRoot 'scripts/postprocess.ps1') -Raw),
+                '(?m)^\$ArchiveLayoutVersion\s*=\s*(\d+)').Groups[1].Value
+            Assert-True ($declaredLayout -ne '') `
+                'postprocess.ps1 must declare $ArchiveLayoutVersion'
+            Assert-Equal $declaredLayout "$($manifest.archive_layout_version)" `
+                'manifest.json must record the archive layout version consumers check'
 
             $formatIds = @($manifest.codecs | ForEach-Object { $_.format_id })
             Assert-True ($formatIds -contains '248') 'codecs should come from requested_formats'
