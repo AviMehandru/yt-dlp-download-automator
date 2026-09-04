@@ -72,8 +72,46 @@ VIEWER_VERSION = "1.0"
 # ---------------------------------------------------------------------------
 
 VIDEO_EXTS = (".mkv", ".mp4", ".webm", ".m4v", ".mov", ".avi", ".flv", ".ts")
+# Archive layout 2: an audio-only run writes "Final Audio.<ext>" and there is
+# no video file in the folder at all. ".webm" is deliberately absent here --
+# it is already in VIDEO_EXTS, and a WebM holding only an Opus stream is
+# found by the video pass and handled correctly downstream by plan(), which
+# probes the actual streams rather than trusting the extension.
+AUDIO_EXTS = (".m4a", ".opus", ".mp3", ".flac", ".ogg", ".oga", ".wav", ".aac")
 IMAGE_EXTS = (".png", ".webp", ".jpg", ".jpeg", ".gif", ".avif")
 SUB_EXTS = (".vtt", ".srt", ".ass", ".ssa", ".lrc", ".json3", ".srv1", ".srv2", ".srv3", ".ttml")
+
+
+def find_media(entry):
+    """The one place that decides which file to play for a video folder.
+
+    Returns (index, file) like Entry.find, or (None, None) when the folder
+    holds no playable media -- which under archive layout 2 is an ordinary
+    state, not a broken folder: --mode metadata-only/comments-only/subs-only
+    all write a complete folder with no media in it.
+
+    Was five copies of the same lambda testing `f["ext"] in VIDEO_EXTS`.
+    That was right while every run produced one merged video; layout 2 also
+    writes "Final Audio.<ext>", and five copies is five chances to update
+    only four of them.
+
+    Two passes rather than one predicate, so the video preference is real
+    rather than an accident of directory order -- Entry.find returns the
+    first match in file order, so a single combined predicate would pick
+    whichever of the two the filesystem happened to list first.
+
+    `Pre-merge streams/` stays excluded for the reason it always was:
+    --keep-video leaves the raw video-only and audio-only halves there, and
+    picking one yields a silent video or a black screen, which reads as a
+    corrupt archive rather than a wrong file choice.
+    """
+    def usable(f, exts):
+        return f["ext"] in exts and "pre-merge" not in f["folder"].lower()
+
+    idx, f = entry.find(lambda f: usable(f, VIDEO_EXTS))
+    if idx is not None:
+        return idx, f
+    return entry.find(lambda f: usable(f, AUDIO_EXTS))
 
 # info.json keys that are enormous and useless in a metadata panel. They are
 # dropped from the cached copy; the UI says so rather than pretending the
@@ -593,8 +631,7 @@ class Index(object):
                 m = e.meta
                 thumb_idx, _ = e.find(lambda f: f["ext"] in IMAGE_EXTS
                                       and "thumbnail" in f["rel"].lower())
-                vid_idx, _ = e.find(lambda f: f["ext"] in VIDEO_EXTS
-                                    and "pre-merge" not in f["folder"].lower())
+                vid_idx, _ = find_media(e)
                 subs = [f for f in e.files if f["ext"] in SUB_EXTS]
                 out.append({
                     "key": key,
@@ -1190,8 +1227,7 @@ def make_handler(app):
             meta["thumb_idx"] = thumb_idx if thumb_idx is not None else (
                 images[0]["idx"] if images else None)
 
-            vid_idx, vid = entry.find(lambda f: f["ext"] in VIDEO_EXTS
-                                      and "pre-merge" not in f["folder"].lower())
+            vid_idx, vid = find_media(entry)
             meta["video_idx"] = vid_idx
             meta["video_name"] = os.path.basename(vid["rel"]) if vid else None
             meta["video_size"] = vid["size"] if vid else None
@@ -1217,8 +1253,7 @@ def make_handler(app):
         def api_playback(self, entry, rest, query):
             vid_idx = query.get("idx", [None])[0]
             if vid_idx is None:
-                vid_idx, _ = entry.find(lambda f: f["ext"] in VIDEO_EXTS
-                                        and "pre-merge" not in f["folder"].lower())
+                vid_idx, _ = find_media(entry)
             src = entry.path_for_index(vid_idx)
             if not src:
                 return self._err(404, "no video file")
@@ -1277,8 +1312,7 @@ def make_handler(app):
                                       "you are browsing on.")
             path = entry.path_for_index(query.get("idx", [None])[0])
             if not path:
-                vid_idx, _ = entry.find(lambda f: f["ext"] in VIDEO_EXTS
-                                        and "pre-merge" not in f["folder"].lower())
+                vid_idx, _ = find_media(entry)
                 path = entry.path_for_index(vid_idx)
             if not path:
                 return self._err(404, "nothing to open")
@@ -1339,8 +1373,7 @@ def make_handler(app):
             if kind == "video":
                 vid_idx = query.get("idx", [None])[0]
                 if vid_idx is None:
-                    vid_idx, _ = entry.find(lambda f: f["ext"] in VIDEO_EXTS
-                                            and "pre-merge" not in f["folder"].lower())
+                    vid_idx, _ = find_media(entry)
                 src = entry.path_for_index(vid_idx)
                 if not src:
                     return self._err(404, "no video file")
